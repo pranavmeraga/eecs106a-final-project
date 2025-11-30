@@ -38,7 +38,7 @@ pip install opencv-python mediapipe numpy
 ### At School (Ubuntu with ROS2)
 ```bash
 # Clone repo
-git clone <your-repo-url>
+git clone https://github.com/pranavmeraga/eecs106a-final-project
 cd eecs106a-final-project
 
 # Build ROS2 package
