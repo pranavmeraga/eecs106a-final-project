@@ -1,6 +1,6 @@
 # Head-Gesture Controlled UR7e Robotic Arm
 
-EE106A Fall 2024 Final Project
+EE106A Fall 2025 Final Project
 
 ## Team
 
