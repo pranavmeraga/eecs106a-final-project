@@ -21,25 +21,10 @@ Control a UR7e robotic arm using only head movements and eye blinks - no physica
 
 ## Installation
 
-### Local Development (Mac)
-```bash
-# Clone repo
-git clone <your-repo-url>
-cd eecs106a-final-project
-
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
+### Development
 # Install dependencies
 pip install opencv-python mediapipe numpy
 ```
-
-### At School (Ubuntu with ROS2)
-```bash
-# Clone repo
-git clone https://github.com/pranavmeraga/eecs106a-final-project
-cd eecs106a-final-project
 
 # Build ROS2 package
 colcon build --packages-select head_teleop
