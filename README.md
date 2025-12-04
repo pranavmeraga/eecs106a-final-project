@@ -112,7 +112,7 @@ self.eps_scale = 0.005        # Scale deadzone
 ls /dev/video*
 
 # Try different camera index (0, 1, 2...)
-# Edit head_pose_blink_node.py line 31:
+# Edit head_pose_blink_node.py line 47:
 self.cap = cv2.VideoCapture(0)  # Change 0 to 1, 2, etc.
 ```
 

@@ -14,6 +14,21 @@ BLINK_DOUBLE = 2
 BLINK_LONG = 3
 
 
+def rotation_matrix_to_euler_angles(R):
+    """Convert rotation matrix to Euler angles (yaw, pitch, roll)."""
+    sy = np.sqrt(R[0, 0] * R[0, 0] + R[1, 0] * R[1, 0])
+    singular = sy < 1e-6
+    if not singular:
+        x = np.arctan2(R[2, 1], R[2, 2])
+        y = np.arctan2(-R[2, 0], sy)
+        z = np.arctan2(R[1, 0], R[0, 0])
+    else:
+        x = np.arctan2(-R[1, 2], R[1, 1])
+        y = np.arctan2(-R[2, 0], sy)
+        z = 0
+    return np.array([x, y, z])
+
+
 class HeadPoseBlinkNode(Node):
     def __init__(self):
         super().__init__('head_pose_blink_node')
@@ -34,21 +49,28 @@ class HeadPoseBlinkNode(Node):
             self.get_logger().error("Camera not opened")
             raise RuntimeError("Camera failed")
 
+        # Neutral pose calibration
         self.neutral_set = False
         self.yaw0 = 0.0
         self.pitch0 = 0.0
         self.scale0 = 1.0
 
+        # Deadzone thresholds
         self.eps_yaw = 0.02
         self.eps_pitch = 0.02
         self.eps_scale = 0.005
 
+        # Face landmark indices for solvePnP (canonical stable subset)
+        self.pose_landmark_indices = [33, 263, 1, 61, 291, 199]
+
+        # Eye indices for blink detection
         self.left_eye_idx = [33, 160, 158, 133, 153, 144]
         self.right_eye_idx = [263, 387, 385, 362, 380, 373]
         self.eye_closed = False
         self.eye_close_start = 0.0
         self.last_single_time = 0.0
 
+        # Blink detection parameters
         self.EAR_THRESH = 0.21
         self.LONG_BLINK_TIME = 0.7
         self.SINGLE_BLINK_MAX = 0.35
@@ -73,26 +95,59 @@ class HeadPoseBlinkNode(Node):
         lm = results.multi_face_landmarks[0].landmark
         pts = np.array([[l.x * w, l.y * h] for l in lm])
 
-        nose_idx, left_ear_idx, right_ear_idx = 1, 234, 454
-        nose = pts[nose_idx]
+        # Use solvePnP for more accurate head pose estimation
+        pts_2d = []
+        pts_3d = []
+        for idx in self.pose_landmark_indices:
+            x = lm[idx].x * w
+            y = lm[idx].y * h
+            z = lm[idx].z * 300  # scaled depth estimate
+            pts_2d.append([x, y])
+            pts_3d.append([x, y, z])
+
+        pts_2d = np.array(pts_2d, dtype=np.float64)
+        pts_3d = np.array(pts_3d, dtype=np.float64)
+
+        # Camera matrix
+        focal_length = w
+        cam_matrix = np.array([[focal_length, 0, w / 2],
+                               [0, focal_length, h / 2],
+                               [0, 0, 1]], dtype=np.float64)
+        dist_coeffs = np.zeros((4, 1), dtype=np.float64)
+
+        # Solve head pose using solvePnP
+        try:
+            _, rot_vec, _ = cv2.solvePnP(pts_3d, pts_2d, cam_matrix, dist_coeffs)
+            rot_mat, _ = cv2.Rodrigues(rot_vec)
+            rpy = rotation_matrix_to_euler_angles(rot_mat)
+            yaw, pitch, roll = rpy
+        except Exception as e:
+            self.get_logger().warn(f"Pose estimation failed: {e}")
+            self.publish_head_pose(0.0, 0.0, 0.0)
+            self.publish_blink(BLINK_NONE)
+            return
+
+        # Calculate scale from face width (for forward/back movement)
+        left_ear_idx, right_ear_idx = 234, 454
         left_ear = pts[left_ear_idx]
         right_ear = pts[right_ear_idx]
-        ear_mid = 0.5 * (left_ear + right_ear)
-
-        yaw = (nose[0] - ear_mid[0]) / w
-        pitch = (nose[1] - ear_mid[1]) / h
         face_width = np.linalg.norm(left_ear - right_ear)
         scale = face_width / w if w > 0 else 0.0
 
+        # Set neutral pose on first detection
         if not self.neutral_set:
-            self.yaw0, self.pitch0, self.scale0 = yaw, pitch, scale if scale > 1e-3 else 1.0
+            self.yaw0 = float(yaw)
+            self.pitch0 = float(pitch)
+            self.scale0 = scale if scale > 1e-3 else 1.0
             self.neutral_set = True
             self.get_logger().info("Neutral pose set")
 
-        dyaw = yaw - self.yaw0
-        dpitch = pitch - self.pitch0
+        # Calculate deltas from neutral pose
+        dyaw = float(yaw) - self.yaw0
+        dpitch = float(pitch) - self.pitch0
         dscale = scale - self.scale0
 
+        # Apply deadzone
         if abs(dyaw) < self.eps_yaw:
             dyaw = 0.0
         if abs(dpitch) < self.eps_pitch:
