@@ -49,9 +49,9 @@ class HeadTeleopMapperNode(Node):
         self.stop_pub = self.create_publisher(Bool, 'stop_cmd', 10)
 
         # Thresholds (radians)
-        self.pitch_threshold = 0.15
-        self.roll_threshold = 0.15
-        self.yaw_threshold = 0.15
+        self.pitch_threshold = 0.08
+        self.roll_threshold = 0.08
+        self.yaw_threshold = 0.08
         self.deadzone = 0.05
 
         # Control gains
