@@ -3,25 +3,32 @@
 **EE106A Fall 2025 Final Project**
 
 ## Team
+[Your team members here]
 
 ## Overview
 Control a UR7e robotic arm using only head movements and facial gestures - no physical controllers needed. Uses computer vision (MediaPipe) to track facial landmarks and translate head poses into robot commands in real-time.
 
 ## Control Mapping
 
-| Human Action | Robot Response | Notes |
-|--------------|----------------|-------|
-| **Turn head left/right** | Base joint rotation (1st DOF) | Yaw angle ~±9° threshold |
-| **Nod up/down** | Limb joint vertical movement (2nd DOF) | Face position ~±20px threshold |
-| **Tilt head left/right** | Limb joint forward/backward (3rd DOF) | Roll angle + eye-mouth distance |
+| Human Action | Robot Response | Detection Method |
+|--------------|----------------|------------------|
+| **Turn head left/right** | Base joint rotation (1st DOF) | Mouth horizontal position (±25px threshold) |
+| **Nod up/down** | Limb joint vertical movement (2nd DOF) | Face vertical position (±25px threshold) |
+| **Tilt head left/right** | Limb joint forward/backward (3rd DOF) | Eye line angle (±6.9° threshold) |
 | **Long blink (>1s)** | Toggle gripper open/close | Hold eyes closed |
 | **Open mouth wide** | **Emergency stop** | Immediate zero velocity |
 
 ### Control Behavior
 - **Velocity Control**: Robot moves while you hold the gesture. Return to neutral to stop.
-- **Large Deadzones**: Stable neutral zone (~3-9° depending on axis) prevents unintended commands
+- **Large Deadzones**: Stable neutral zone (10px for position, ~3° for angles) prevents unintended commands
+- **Independent Detection**: Each motion type uses distinct measurement (mouth X, face Y, eye angle)
 - **Deliberate Movements**: Thresholds require clear, intentional gestures (not micro-movements)
 - **Recenter Anytime**: Press 'r' to set current head position as new neutral reference
+
+### How Each Motion Works
+- **TURN**: Tracks horizontal position of mouth center - mouth moves left/right in frame
+- **NOD**: Tracks vertical position of entire face (nose, chin, forehead) - whole face moves up/down in frame
+- **TILT**: Tracks angle of line connecting eyes - one eye becomes higher than the other
 
 ## Installation
 
@@ -67,6 +74,14 @@ python facemesh_preview.py --camera 1
 # Press 'q' to quit
 ```
 
+**Visual Feedback in Preview:**
+- **GREEN values** = In deadzone (stable neutral)
+- **YELLOW values** = Moving but below threshold
+- **RED values** = Command active
+- **Blue circles** = Eyes (for tilt detection)
+- **Green circles** = Mouth corners (for turn detection)
+- **Yellow circles** = Face center (for nod detection)
+
 ### Full System: Robot Control
 
 #### 1. Launch Head Tracking
@@ -78,6 +93,7 @@ ros2 launch head_teleop head_teleop_launch.py
 #### 2. Launch UR7e Driver (separate terminal)
 ```bash
 # Use lab's provided UR driver
+```
 
 #### 3. Verify System
 ```bash
@@ -132,19 +148,17 @@ eecs106a-final-project/
 ## Tuning Parameters
 
 ### Detection Thresholds
-Edit `facemesh_preview.py` (lines 112-124) or `head_pose_blink_node.py`:
+Edit `facemesh_preview.py` (lines 125-135):
 ```python
-# Movement detection thresholds
-YAW_THRESHOLD = 0.15      # ~8.6° - turn left/right
-PITCH_THRESHOLD = 20.0    # 20 pixels - nod up/down
-ROLL_THRESHOLD = 0.15     # ~8.6° - tilt left/right
-TILT_THRESHOLD = 10.0     # 10 pixels - tilt detection
+# CLEAR THRESHOLDS - each motion is independent
+TURN_THRESHOLD = 25.0     # pixels - mouth horizontal movement (TURN)
+NOD_THRESHOLD = 25.0      # pixels - face vertical movement (NOD)
+TILT_THRESHOLD = 0.12     # radians ~6.9° - eye line angle (TILT)
 
-# Deadzones (stable neutral zone)
-YAW_DEADZONE = 0.06       # ~3.4° - turn stability
-PITCH_DEADZONE = 8.0      # 8 pixels - nod stability
-ROLL_DEADZONE = 0.06      # ~3.4° - tilt stability
-TILT_DEADZONE = 5.0       # 5 pixels - tilt stability
+# LARGE DEADZONES for stable neutral
+TURN_DEADZONE = 10.0      # pixels - stable center for turn
+NOD_DEADZONE = 10.0       # pixels - stable center for nod
+TILT_DEADZONE = 0.05      # radians ~2.9° - stable center for tilt
 ```
 
 ### Robot Control Gains
@@ -174,19 +188,19 @@ MOUTH_OPEN_THRESH = 0.03  # Mouth open threshold (relative)
 ```
 
 ### Smoothing
-Edit filter alpha values (lines 107-111 in `facemesh_preview.py`):
+Edit filter alpha values (lines 107-109 in `facemesh_preview.py`):
 ```python
 # Lower alpha = more smoothing, less responsive
-yaw_filter = SmoothingFilter(alpha=0.4)     # Default: 0.4
-pitch_filter = SmoothingFilter(alpha=0.4)
-roll_filter = SmoothingFilter(alpha=0.4)
+face_y_filter = SmoothingFilter(alpha=0.3)    # Nod detection
+mouth_x_filter = SmoothingFilter(alpha=0.3)   # Turn detection
+tilt_filter = SmoothingFilter(alpha=0.3)      # Tilt detection
 ```
 
 ## Troubleshooting
 
 ### Camera Issues
 ```bash
-# Test different camera indices (Local)
+# Test different camera indices
 python facemesh_preview.py --camera 0  # Built-in
 python facemesh_preview.py --camera 1  # External
 ```
@@ -199,8 +213,15 @@ python facemesh_preview.py --camera 1  # External
 
 ### Commands Always Active (No Neutral Zone)
 - **Press 'r' to recenter** at comfortable position
-- Increase deadzones in code if needed
-- Check absolute angle values on screen - neutral should be stable
+- Check all delta values show **0.00** and **GREEN** after recentering
+- If still issues, increase deadzones in code
+- Watch the colored circles on screen to verify tracking
+
+### One Motion Confused with Another
+- **Turn vs Tilt**: Turn shows mouth moving horizontally; tilt shows eyes at different heights
+- **Nod vs Tilt**: Nod shows whole face moving vertically; tilt shows eye angle change
+- Use visual markers (colored circles) to debug which landmarks are being tracked
+- Ensure lighting is even (shadows can confuse detection)
 
 ### Topics Not Connecting
 ```bash
@@ -223,7 +244,7 @@ ros2 topic list | grep cmd
 python3 --version
 
 # Create venv with correct Python version
-python3.12 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 pip install opencv-python mediapipe numpy
 ```
@@ -232,6 +253,9 @@ pip install opencv-python mediapipe numpy
 ```bash
 # Verify UR driver is running
 ros2 node list | grep ur
+
+# Check if robot is in remote control mode
+# (Check teach pendant)
 
 # Test with manual command
 ros2 topic pub /base_joint_cmd geometry_msgs/msg/Twist \
@@ -244,11 +268,18 @@ ros2 topic echo /stop_cmd
 ## Development Notes
 
 ### Algorithm Details
-- **Head Pose**: Uses OpenCV `solvePnP` with 6 stable facial landmarks
-- **Nod Detection**: Tracks vertical position of face center (nose, chin, forehead average)
-- **Tilt Detection**: Combines roll angle + eye-mouth distance ratio
-- **Turn Detection**: Uses yaw angle from rotation matrix
-- **Smoothing**: Exponential moving average filter (α=0.4)
+- **Turn Detection**: Tracks horizontal position (X coordinate) of mouth center
+- **Nod Detection**: Tracks vertical position (Y coordinate) of face center (nose, chin, forehead average)
+- **Tilt Detection**: Calculates angle of line connecting left and right eyes using `arctan2(dy, dx)`
+- **Head Pose**: Uses OpenCV `solvePnP` with 6 stable facial landmarks for additional validation
+- **Smoothing**: Exponential moving average filter (α=0.3) for stable readings
+
+### Key Landmarks Used
+- **Eyes (landmarks 33, 263)**: For tilt angle calculation
+- **Mouth corners (landmarks 61, 291)**: For turn detection
+- **Nose tip (landmark 1)**: For face center (nod detection)
+- **Chin (landmark 152)**: For face center (nod detection)
+- **Forehead (landmark 10)**: For face center (nod detection)
 
 ### ROS2 Topics
 **Published by `head_pose_blink_node`:**
