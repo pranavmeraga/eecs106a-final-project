@@ -3,7 +3,10 @@
 **EE106A Fall 2025 Final Project**
 
 ## Team
-[Your team members here]
+Pranav Meraga
+Loveveer Singh
+Yutong Bian
+Alan Li
 
 ## Overview
 Control a UR7e robotic arm using only head movements and facial gestures - no physical controllers needed. Uses computer vision (MediaPipe) to track facial landmarks and translate head poses into robot commands in real-time.
