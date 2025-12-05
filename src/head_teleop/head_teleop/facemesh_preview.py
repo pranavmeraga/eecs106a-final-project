@@ -25,6 +25,13 @@ RIGHT_EYE_IDX = [263, 387, 385, 362, 380, 373]
 MOUTH_TOP_IDX = 13
 MOUTH_BOTTOM_IDX = 14
 
+# Additional landmarks for better detection
+NOSE_TIP = 1
+LEFT_EYE_CENTER = 468
+RIGHT_EYE_CENTER = 473
+CHIN = 152
+FOREHEAD = 10
+
 
 class SmoothingFilter:
     """Exponential moving average filter."""
@@ -67,6 +74,41 @@ def eye_aspect_ratio(eye_pts: np.ndarray) -> float:
     return (v1 + v2) / (2.0 * h + 1e-6)
 
 
+def calculate_face_center_y(lm, h):
+    """Calculate vertical center of face (for pitch detection)."""
+    # Average Y position of key facial features
+    nose_y = lm[NOSE_TIP].y * h
+    chin_y = lm[CHIN].y * h
+    forehead_y = lm[FOREHEAD].y * h
+    
+    # Center is average of these points
+    center_y = (nose_y + chin_y + forehead_y) / 3.0
+    return center_y
+
+
+def calculate_eye_mouth_ratio(lm, h):
+    """Calculate ratio between eye positions and mouth for tilt detection."""
+    # Get eye positions
+    left_eye_y = lm[33].y * h
+    right_eye_y = lm[263].y * h
+    
+    # Get mouth position
+    mouth_y = lm[MOUTH_TOP_IDX].y * h
+    
+    # Eye center
+    eye_center_y = (left_eye_y + right_eye_y) / 2.0
+    
+    # Distance from eye center to mouth
+    eye_mouth_dist = mouth_y - eye_center_y
+    
+    # Horizontal distance between eyes
+    left_eye_x = lm[33].x * h
+    right_eye_x = lm[263].x * h
+    eye_separation = abs(right_eye_x - left_eye_x)
+    
+    return eye_mouth_dist, eye_separation
+
+
 def main(camera_index: int = 0, mirror: bool = True) -> None:
     mp_face_mesh = mp.solutions.face_mesh
     mesh = mp_face_mesh.FaceMesh(
@@ -91,17 +133,22 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
     print("  • Hold blink >1s        → Grasp")
     print("  • Open mouth wide       → Emergency Stop")
     print("-" * 60)
-    print("Press 'q' quit | 'r' reset | 'm' toggle mirror")
+    print("Press 'q' quit | 'r' RECENTER | 'm' toggle mirror")
+    print("IMPORTANT: Press 'r' to RECENTER at your current position!")
     print("=" * 60)
 
     # Neutral pose
     neutral_set = False
     yaw0, pitch0, roll0 = 0.0, 0.0, 0.0
+    face_center_y0 = 0.0
+    eye_mouth_dist0 = 0.0
     
-    # Smoothing filters with moderate smoothing
+    # Smoothing filters
     yaw_filter = SmoothingFilter(alpha=0.4)
     pitch_filter = SmoothingFilter(alpha=0.4)
     roll_filter = SmoothingFilter(alpha=0.4)
+    face_y_filter = SmoothingFilter(alpha=0.4)
+    tilt_filter = SmoothingFilter(alpha=0.4)
     
     # Blink tracking
     eye_closed = False
@@ -112,17 +159,14 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
     # Mouth tracking
     MOUTH_OPEN_THRESH = 0.03
     
-    # OPTIMIZED THRESHOLDS for better detection
-    # Pitch needs to be MORE sensitive because nodding is smaller motion
-    YAW_THRESHOLD = 0.10     # ~5.7 degrees (turn left/right)
-    PITCH_THRESHOLD = 0.06   # ~3.4 degrees (nod up/down) - MORE SENSITIVE
-    ROLL_THRESHOLD = 0.10    # ~5.7 degrees (tilt left/right)
-    DEADZONE = 0.02          # ~1.1 degrees
-
-    # Scaling factors for better visual feedback
-    YAW_SCALE = 1.2      # Amplify yaw slightly
-    PITCH_SCALE = 1.5    # Amplify pitch more (nodding is subtle)
-    ROLL_SCALE = 1.2     # Amplify roll slightly
+    # IMPROVED THRESHOLDS
+    YAW_THRESHOLD = 0.12     # ~6.9 degrees (turn left/right)
+    PITCH_THRESHOLD = 15.0   # pixels - vertical face movement
+    ROLL_THRESHOLD = 0.12    # ~6.9 degrees (tilt using roll angle)
+    TILT_THRESHOLD = 8.0     # pixels - eye-mouth distance change for tilt
+    
+    DEADZONE = 0.04          # ~2.3 degrees for angles
+    DEADZONE_PX = 5.0        # pixels for position-based detection
 
     while True:
         ret, frame = cap.read()
@@ -168,42 +212,53 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
                 rot_mat, _ = cv2.Rodrigues(rot_vec)
                 roll, pitch, yaw = rotation_matrix_to_euler_angles(rot_mat)
 
-                # FIX: Invert yaw if mirrored (so left is left, right is right)
+                # Calculate additional metrics
+                face_center_y = calculate_face_center_y(lm, h)
+                eye_mouth_dist, eye_separation = calculate_eye_mouth_ratio(lm, h)
+
+                # FIX: Invert yaw and roll if mirrored
                 if mirror:
                     yaw = -yaw
                     roll = -roll
 
-                # Set neutral pose
+                # Set neutral pose on first frame
                 if not neutral_set:
                     yaw0, pitch0, roll0 = yaw, pitch, roll
+                    face_center_y0 = face_center_y
+                    eye_mouth_dist0 = eye_mouth_dist
                     neutral_set = True
-                    print(f"✓ Neutral pose set: "
-                          f"yaw={np.degrees(yaw0):.1f}° "
-                          f"pitch={np.degrees(pitch0):.1f}° "
-                          f"roll={np.degrees(roll0):.1f}°")
+                    print(f"✓ Initial neutral: yaw={np.degrees(yaw0):.1f}° pitch={np.degrees(pitch0):.1f}° roll={np.degrees(roll0):.1f}°")
+                    print("💡 PRESS 'r' TO RECENTER if this position is not comfortable!")
 
                 # Calculate deltas
                 dyaw = yaw - yaw0
-                dpitch = pitch - pitch0
+                dpitch_angle = pitch - pitch0
                 droll = roll - roll0
                 
-                # Apply SCALING for better sensitivity
-                dyaw *= YAW_SCALE
-                dpitch *= PITCH_SCALE
-                droll *= ROLL_SCALE
+                # Position-based metrics
+                dface_y = face_center_y - face_center_y0  # Vertical movement (for nod)
+                deye_mouth = eye_mouth_dist - eye_mouth_dist0  # For tilt detection
                 
                 # APPLY SMOOTHING
                 dyaw = yaw_filter.update(dyaw)
-                dpitch = pitch_filter.update(dpitch)
+                dpitch_angle = pitch_filter.update(dpitch_angle)
                 droll = roll_filter.update(droll)
+                dface_y = face_y_filter.update(dface_y)
+                deye_mouth = tilt_filter.update(deye_mouth)
                 
-                # Apply deadzone
+                # Apply deadzone to angles
                 if abs(dyaw) < DEADZONE:
                     dyaw = 0.0
-                if abs(dpitch) < DEADZONE:
-                    dpitch = 0.0
+                if abs(dpitch_angle) < DEADZONE:
+                    dpitch_angle = 0.0
                 if abs(droll) < DEADZONE:
                     droll = 0.0
+                
+                # Apply deadzone to positions
+                if abs(dface_y) < DEADZONE_PX:
+                    dface_y = 0.0
+                if abs(deye_mouth) < DEADZONE_PX:
+                    deye_mouth = 0.0
 
                 # Display angles
                 y_offset = 30
@@ -220,22 +275,42 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
                 y_offset += 35
-                cv2.putText(frame, "=== DELTA (scaled+smoothed) ===", (10, y_offset),
+                cv2.putText(frame, "=== DELTA (smoothed) ===", (10, y_offset),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 y_offset += 25
                 
-                # Color code based on threshold
-                yaw_color = (0, 0, 255) if abs(dyaw) > YAW_THRESHOLD else (0, 255, 255)
-                pitch_color = (0, 0, 255) if abs(dpitch) > PITCH_THRESHOLD else (0, 255, 255)
-                roll_color = (0, 0, 255) if abs(droll) > ROLL_THRESHOLD else (0, 255, 255)
+                # Color code: GREEN=deadzone, YELLOW=below threshold, RED=command active
+                if dyaw == 0.0:
+                    yaw_color = (0, 255, 0)
+                elif abs(dyaw) > YAW_THRESHOLD:
+                    yaw_color = (0, 0, 255)
+                else:
+                    yaw_color = (0, 255, 255)
+                
+                if dface_y == 0.0:
+                    pitch_color = (0, 255, 0)
+                elif abs(dface_y) > PITCH_THRESHOLD:
+                    pitch_color = (0, 0, 255)
+                else:
+                    pitch_color = (0, 255, 255)
+                
+                if droll == 0.0 and deye_mouth == 0.0:
+                    roll_color = (0, 255, 0)
+                elif abs(droll) > ROLL_THRESHOLD or abs(deye_mouth) > TILT_THRESHOLD:
+                    roll_color = (0, 0, 255)
+                else:
+                    roll_color = (0, 255, 255)
                 
                 cv2.putText(frame, f"dYaw:   {np.degrees(dyaw):7.2f} deg", (10, y_offset),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, yaw_color, 2)
                 y_offset += 25
-                cv2.putText(frame, f"dPitch: {np.degrees(dpitch):7.2f} deg", (10, y_offset),
+                cv2.putText(frame, f"dFaceY: {dface_y:7.2f} px", (10, y_offset),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, pitch_color, 2)
                 y_offset += 25
                 cv2.putText(frame, f"dRoll:  {np.degrees(droll):7.2f} deg", (10, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, roll_color, 2)
+                y_offset += 25
+                cv2.putText(frame, f"dTilt:  {deye_mouth:7.2f} px", (10, y_offset),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, roll_color, 2)
 
                 # Commands
@@ -246,7 +321,7 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
 
                 command_shown = False
 
-                # Yaw command (turn left/right)
+                # Yaw command (turn left/right) - works well
                 if dyaw < -YAW_THRESHOLD:
                     cv2.putText(frame, "Turn LEFT", (10, y_offset),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
@@ -258,33 +333,34 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
                     command_shown = True
                     y_offset += 30
 
-                # Pitch command (nod up/down) - FIXED with better threshold
-                if dpitch > PITCH_THRESHOLD:  # Positive pitch = nod UP
+                # Pitch command (nod up/down) - using face Y position
+                if dface_y < -PITCH_THRESHOLD:  # Face moved UP
                     cv2.putText(frame, "Nod UP", (10, y_offset),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                     command_shown = True
                     y_offset += 30
-                elif dpitch < -PITCH_THRESHOLD:  # Negative pitch = nod DOWN
+                elif dface_y > PITCH_THRESHOLD:  # Face moved DOWN
                     cv2.putText(frame, "Nod DOWN", (10, y_offset),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                     command_shown = True
                     y_offset += 30
 
-                # Roll command (tilt left/right)
-                if droll < -ROLL_THRESHOLD:
-                    cv2.putText(frame, "Rotate LEFT (tilt)", (10, y_offset),
+                # Roll command (tilt left/right) - using both roll angle AND eye-mouth distance
+                # Tilt changes eye-mouth relationship more than turn does
+                if (droll < -ROLL_THRESHOLD or deye_mouth < -TILT_THRESHOLD):
+                    cv2.putText(frame, "Tilt LEFT", (10, y_offset),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                     command_shown = True
                     y_offset += 30
-                elif droll > ROLL_THRESHOLD:
-                    cv2.putText(frame, "Rotate RIGHT (tilt)", (10, y_offset),
+                elif (droll > ROLL_THRESHOLD or deye_mouth > TILT_THRESHOLD):
+                    cv2.putText(frame, "Tilt RIGHT", (10, y_offset),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                     command_shown = True
                     y_offset += 30
                 
                 if not command_shown:
                     cv2.putText(frame, "(neutral - no command)", (10, y_offset),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 128, 128), 1)
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
             # Blink detection
             left_eye = pts[LEFT_EYE_IDX]
@@ -343,9 +419,9 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
             cv2.putText(frame, "No face detected", (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
 
-        # Instructions at bottom
-        cv2.putText(frame, f"Mirror: {'ON' if mirror else 'OFF'} | q=quit r=reset m=mirror", 
-                   (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        # Instructions at bottom - EMPHASIZE RECENTER
+        cv2.putText(frame, ">>> PRESS 'r' TO RECENTER <<< | m=mirror | q=quit", 
+                   (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
         cv2.imshow("Facemesh Preview - Robust", frame)
         
@@ -353,14 +429,31 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
         if key == ord('q'):
             break
         elif key == ord('r'):
-            neutral_set = False
-            yaw_filter.reset()
-            pitch_filter.reset()
-            roll_filter.reset()
-            print("Neutral pose reset - reposition and wait...")
+            # RECENTER
+            if result.multi_face_landmarks and success:
+                # Set current position as new center
+                yaw0 = yaw
+                pitch0 = pitch
+                roll0 = roll
+                face_center_y0 = face_center_y
+                eye_mouth_dist0 = eye_mouth_dist
+                
+                # Create brand new filters
+                yaw_filter = SmoothingFilter(alpha=0.4)
+                pitch_filter = SmoothingFilter(alpha=0.4)
+                roll_filter = SmoothingFilter(alpha=0.4)
+                face_y_filter = SmoothingFilter(alpha=0.4)
+                tilt_filter = SmoothingFilter(alpha=0.4)
+                
+                print(f"\n✅ RECENTERED SUCCESSFULLY!")
+                print(f"   Angles: yaw={np.degrees(yaw0):.1f}° pitch={np.degrees(pitch0):.1f}° roll={np.degrees(roll0):.1f}°")
+                print(f"   Face Y: {face_center_y0:.1f}px, Eye-mouth: {eye_mouth_dist0:.1f}px")
+                print(f"   All deltas should now be GREEN (in deadzone)")
+            else:
+                print("\n⚠️  Cannot recenter - no face detected")
         elif key == ord('m'):
             mirror = not mirror
-            print(f"Mirror mode: {'ON' if mirror else 'OFF'}")
+            print(f"\n🔄 Mirror mode: {'ON' if mirror else 'OFF'}")
 
     cap.release()
     mesh.close()
