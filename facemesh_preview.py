@@ -27,15 +27,15 @@ MOUTH_BOTTOM_IDX = 14
 
 # Additional landmarks for better detection
 NOSE_TIP = 1
-LEFT_EYE_CENTER = 468
-RIGHT_EYE_CENTER = 473
 CHIN = 152
 FOREHEAD = 10
+LEFT_MOUTH_CORNER = 61
+RIGHT_MOUTH_CORNER = 291
 
 
 class SmoothingFilter:
     """Exponential moving average filter."""
-    def __init__(self, alpha=0.4):
+    def __init__(self, alpha=0.3):
         self.alpha = alpha
         self.value = None
     
@@ -75,38 +75,38 @@ def eye_aspect_ratio(eye_pts: np.ndarray) -> float:
 
 
 def calculate_face_center_y(lm, h):
-    """Calculate vertical center of face (for pitch detection)."""
-    # Average Y position of key facial features
+    """Calculate vertical center of face for NOD detection."""
     nose_y = lm[NOSE_TIP].y * h
     chin_y = lm[CHIN].y * h
     forehead_y = lm[FOREHEAD].y * h
-    
-    # Center is average of these points
     center_y = (nose_y + chin_y + forehead_y) / 3.0
     return center_y
 
 
-def calculate_eye_mouth_ratio(lm, h):
-    """Calculate ratio between eye positions and mouth for tilt detection."""
+def calculate_mouth_horizontal_position(lm, w):
+    """Calculate horizontal center of mouth for TURN detection."""
+    left_mouth_x = lm[LEFT_MOUTH_CORNER].x * w
+    right_mouth_x = lm[RIGHT_MOUTH_CORNER].x * w
+    mouth_center_x = (left_mouth_x + right_mouth_x) / 2.0
+    return mouth_center_x
+
+
+def calculate_head_tilt_angle(lm, w, h):
+    """Calculate TILT based on eye horizontal alignment."""
     # Get eye positions
+    left_eye_x = lm[33].x * w
     left_eye_y = lm[33].y * h
+    right_eye_x = lm[263].x * w
     right_eye_y = lm[263].y * h
     
-    # Get mouth position
-    mouth_y = lm[MOUTH_TOP_IDX].y * h
+    # Calculate angle of line connecting eyes
+    dx = right_eye_x - left_eye_x
+    dy = right_eye_y - left_eye_y
     
-    # Eye center
-    eye_center_y = (left_eye_y + right_eye_y) / 2.0
+    # Angle in radians (0 = horizontal, + = right eye higher, - = left eye higher)
+    tilt_angle = np.arctan2(dy, dx)
     
-    # Distance from eye center to mouth
-    eye_mouth_dist = mouth_y - eye_center_y
-    
-    # Horizontal distance between eyes
-    left_eye_x = lm[33].x * h
-    right_eye_x = lm[263].x * h
-    eye_separation = abs(right_eye_x - left_eye_x)
-    
-    return eye_mouth_dist, eye_separation
+    return tilt_angle
 
 
 def main(camera_index: int = 0, mirror: bool = True) -> None:
@@ -139,16 +139,14 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
 
     # Neutral pose
     neutral_set = False
-    yaw0, pitch0, roll0 = 0.0, 0.0, 0.0
     face_center_y0 = 0.0
-    eye_mouth_dist0 = 0.0
+    mouth_center_x0 = 0.0
+    tilt_angle0 = 0.0
     
     # Smoothing filters
-    yaw_filter = SmoothingFilter(alpha=0.4)
-    pitch_filter = SmoothingFilter(alpha=0.4)
-    roll_filter = SmoothingFilter(alpha=0.4)
-    face_y_filter = SmoothingFilter(alpha=0.4)
-    tilt_filter = SmoothingFilter(alpha=0.4)
+    face_y_filter = SmoothingFilter(alpha=0.3)
+    mouth_x_filter = SmoothingFilter(alpha=0.3)
+    tilt_filter = SmoothingFilter(alpha=0.3)
     
     # Blink tracking
     eye_closed = False
@@ -159,14 +157,15 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
     # Mouth tracking
     MOUTH_OPEN_THRESH = 0.03
     
-    # IMPROVED THRESHOLDS
-    YAW_THRESHOLD = 0.12     # ~6.9 degrees (turn left/right)
-    PITCH_THRESHOLD = 15.0   # pixels - vertical face movement
-    ROLL_THRESHOLD = 0.12    # ~6.9 degrees (tilt using roll angle)
-    TILT_THRESHOLD = 8.0     # pixels - eye-mouth distance change for tilt
+    # CLEAR THRESHOLDS - each motion is independent
+    TURN_THRESHOLD = 25.0     # pixels - mouth horizontal movement (TURN)
+    NOD_THRESHOLD = 25.0      # pixels - face vertical movement (NOD)
+    TILT_THRESHOLD = 0.12     # radians ~6.9° - eye line angle (TILT)
     
-    DEADZONE = 0.04          # ~2.3 degrees for angles
-    DEADZONE_PX = 5.0        # pixels for position-based detection
+    # LARGE DEADZONES for stable neutral
+    TURN_DEADZONE = 10.0      # pixels - LARGE stable center for turn
+    NOD_DEADZONE = 10.0       # pixels - stable center for nod
+    TILT_DEADZONE = 0.05      # radians ~2.9° - stable center for tilt
 
     while True:
         ret, frame = cap.read()
@@ -174,7 +173,6 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
             print("Frame grab failed, exiting.")
             break
 
-        # Mirror the frame if enabled (fixes left/right flip)
         if mirror:
             frame = cv2.flip(frame, 1)
 
@@ -186,7 +184,6 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
             lm = result.multi_face_landmarks[0].landmark
             pts = np.array([[l.x * w, l.y * h] for l in lm])
 
-            # Calculate head pose
             pts_2d = np.array(
                 [[lm[idx].x * w, lm[idx].y * h] for idx in POSE_LANDMARKS],
                 dtype=np.float64
@@ -209,69 +206,53 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
             )
 
             if success:
-                rot_mat, _ = cv2.Rodrigues(rot_vec)
-                roll, pitch, yaw = rotation_matrix_to_euler_angles(rot_mat)
-
-                # Calculate additional metrics
-                face_center_y = calculate_face_center_y(lm, h)
-                eye_mouth_dist, eye_separation = calculate_eye_mouth_ratio(lm, h)
-
-                # FIX: Invert yaw and roll if mirrored
-                if mirror:
-                    yaw = -yaw
-                    roll = -roll
+                # Calculate distinct metrics for each motion type
+                face_center_y = calculate_face_center_y(lm, h)          # NOD: whole face up/down
+                mouth_center_x = calculate_mouth_horizontal_position(lm, w)  # TURN: mouth left/right
+                tilt_angle = calculate_head_tilt_angle(lm, w, h)       # TILT: eye line angle
 
                 # Set neutral pose on first frame
                 if not neutral_set:
-                    yaw0, pitch0, roll0 = yaw, pitch, roll
                     face_center_y0 = face_center_y
-                    eye_mouth_dist0 = eye_mouth_dist
+                    mouth_center_x0 = mouth_center_x
+                    tilt_angle0 = tilt_angle
                     neutral_set = True
-                    print(f"✓ Initial neutral: yaw={np.degrees(yaw0):.1f}° pitch={np.degrees(pitch0):.1f}° roll={np.degrees(roll0):.1f}°")
-                    print("💡 PRESS 'r' TO RECENTER if this position is not comfortable!")
+                    print(f"✓ Initial neutral:")
+                    print(f"   Face Y: {face_center_y0:.1f}px")
+                    print(f"   Mouth X: {mouth_center_x0:.1f}px")
+                    print(f"   Tilt: {np.degrees(tilt_angle0):.1f}°")
+                    print("💡 PRESS 'r' TO RECENTER if not comfortable!")
 
-                # Calculate deltas
-                dyaw = yaw - yaw0
-                dpitch_angle = pitch - pitch0
-                droll = roll - roll0
-                
-                # Position-based metrics
-                dface_y = face_center_y - face_center_y0  # Vertical movement (for nod)
-                deye_mouth = eye_mouth_dist - eye_mouth_dist0  # For tilt detection
+                # Calculate deltas - INDEPENDENT measurements
+                dnod = face_center_y - face_center_y0      # Vertical face movement
+                dturn = mouth_center_x - mouth_center_x0   # Horizontal mouth movement
+                dtilt = tilt_angle - tilt_angle0           # Eye line angle change
                 
                 # APPLY SMOOTHING
-                dyaw = yaw_filter.update(dyaw)
-                dpitch_angle = pitch_filter.update(dpitch_angle)
-                droll = roll_filter.update(droll)
-                dface_y = face_y_filter.update(dface_y)
-                deye_mouth = tilt_filter.update(deye_mouth)
+                dnod = face_y_filter.update(dnod)
+                dturn = mouth_x_filter.update(dturn)
+                dtilt = tilt_filter.update(dtilt)
                 
-                # Apply deadzone to angles
-                if abs(dyaw) < DEADZONE:
-                    dyaw = 0.0
-                if abs(dpitch_angle) < DEADZONE:
-                    dpitch_angle = 0.0
-                if abs(droll) < DEADZONE:
-                    droll = 0.0
-                
-                # Apply deadzone to positions
-                if abs(dface_y) < DEADZONE_PX:
-                    dface_y = 0.0
-                if abs(deye_mouth) < DEADZONE_PX:
-                    deye_mouth = 0.0
+                # Apply LARGE DEADZONES for stable neutral
+                if abs(dnod) < NOD_DEADZONE:
+                    dnod = 0.0
+                if abs(dturn) < TURN_DEADZONE:
+                    dturn = 0.0
+                if abs(dtilt) < TILT_DEADZONE:
+                    dtilt = 0.0
 
-                # Display angles
+                # Display measurements
                 y_offset = 30
-                cv2.putText(frame, "=== ABSOLUTE ANGLES ===", (10, y_offset),
+                cv2.putText(frame, "=== RAW POSITIONS ===", (10, y_offset),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 y_offset += 25
-                cv2.putText(frame, f"Yaw:   {np.degrees(yaw):7.2f} deg", (10, y_offset),
+                cv2.putText(frame, f"Face Y:  {face_center_y:7.1f} px", (10, y_offset),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                 y_offset += 25
-                cv2.putText(frame, f"Pitch: {np.degrees(pitch):7.2f} deg", (10, y_offset),
+                cv2.putText(frame, f"Mouth X: {mouth_center_x:7.1f} px", (10, y_offset),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                 y_offset += 25
-                cv2.putText(frame, f"Roll:  {np.degrees(roll):7.2f} deg", (10, y_offset),
+                cv2.putText(frame, f"Tilt:    {np.degrees(tilt_angle):7.2f} deg", (10, y_offset),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
                 y_offset += 35
@@ -280,40 +261,20 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
                 y_offset += 25
                 
                 # Color code: GREEN=deadzone, YELLOW=below threshold, RED=command active
-                if dyaw == 0.0:
-                    yaw_color = (0, 255, 0)
-                elif abs(dyaw) > YAW_THRESHOLD:
-                    yaw_color = (0, 0, 255)
-                else:
-                    yaw_color = (0, 255, 255)
+                nod_color = (0, 255, 0) if dnod == 0.0 else ((0, 0, 255) if abs(dnod) > NOD_THRESHOLD else (0, 255, 255))
+                turn_color = (0, 255, 0) if dturn == 0.0 else ((0, 0, 255) if abs(dturn) > TURN_THRESHOLD else (0, 255, 255))
+                tilt_color = (0, 255, 0) if dtilt == 0.0 else ((0, 0, 255) if abs(dtilt) > TILT_THRESHOLD else (0, 255, 255))
                 
-                if dface_y == 0.0:
-                    pitch_color = (0, 255, 0)
-                elif abs(dface_y) > PITCH_THRESHOLD:
-                    pitch_color = (0, 0, 255)
-                else:
-                    pitch_color = (0, 255, 255)
-                
-                if droll == 0.0 and deye_mouth == 0.0:
-                    roll_color = (0, 255, 0)
-                elif abs(droll) > ROLL_THRESHOLD or abs(deye_mouth) > TILT_THRESHOLD:
-                    roll_color = (0, 0, 255)
-                else:
-                    roll_color = (0, 255, 255)
-                
-                cv2.putText(frame, f"dYaw:   {np.degrees(dyaw):7.2f} deg", (10, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, yaw_color, 2)
+                cv2.putText(frame, f"dNod:   {dnod:7.2f} px", (10, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, nod_color, 2)
                 y_offset += 25
-                cv2.putText(frame, f"dFaceY: {dface_y:7.2f} px", (10, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, pitch_color, 2)
+                cv2.putText(frame, f"dTurn:  {dturn:7.2f} px", (10, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, turn_color, 2)
                 y_offset += 25
-                cv2.putText(frame, f"dRoll:  {np.degrees(droll):7.2f} deg", (10, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, roll_color, 2)
-                y_offset += 25
-                cv2.putText(frame, f"dTilt:  {deye_mouth:7.2f} px", (10, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, roll_color, 2)
+                cv2.putText(frame, f"dTilt:  {np.degrees(dtilt):7.2f} deg", (10, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, tilt_color, 2)
 
-                # Commands
+                # Commands - CLEAR SEPARATION
                 y_offset += 35
                 cv2.putText(frame, "=== COMMANDS ===", (10, y_offset),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
@@ -321,40 +282,39 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
 
                 command_shown = False
 
-                # Yaw command (turn left/right) - works well
-                if dyaw < -YAW_THRESHOLD:
-                    cv2.putText(frame, "Turn LEFT", (10, y_offset),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                # TURN command - based on MOUTH horizontal position
+                if dturn < -TURN_THRESHOLD:
+                    cv2.putText(frame, "Turn LEFT (mouth moves left)", (10, y_offset),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     command_shown = True
                     y_offset += 30
-                elif dyaw > YAW_THRESHOLD:
-                    cv2.putText(frame, "Turn RIGHT", (10, y_offset),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                    command_shown = True
-                    y_offset += 30
-
-                # Pitch command (nod up/down) - using face Y position
-                if dface_y < -PITCH_THRESHOLD:  # Face moved UP
-                    cv2.putText(frame, "Nod UP", (10, y_offset),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                    command_shown = True
-                    y_offset += 30
-                elif dface_y > PITCH_THRESHOLD:  # Face moved DOWN
-                    cv2.putText(frame, "Nod DOWN", (10, y_offset),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                elif dturn > TURN_THRESHOLD:
+                    cv2.putText(frame, "Turn RIGHT (mouth moves right)", (10, y_offset),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     command_shown = True
                     y_offset += 30
 
-                # Roll command (tilt left/right) - using both roll angle AND eye-mouth distance
-                # Tilt changes eye-mouth relationship more than turn does
-                if (droll < -ROLL_THRESHOLD or deye_mouth < -TILT_THRESHOLD):
-                    cv2.putText(frame, "Tilt LEFT", (10, y_offset),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                # NOD command - based on FACE vertical position
+                if dnod < -NOD_THRESHOLD:
+                    cv2.putText(frame, "Nod UP (face moves up)", (10, y_offset),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     command_shown = True
                     y_offset += 30
-                elif (droll > ROLL_THRESHOLD or deye_mouth > TILT_THRESHOLD):
-                    cv2.putText(frame, "Tilt RIGHT", (10, y_offset),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                elif dnod > NOD_THRESHOLD:
+                    cv2.putText(frame, "Nod DOWN (face moves down)", (10, y_offset),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    command_shown = True
+                    y_offset += 30
+
+                # TILT command - based on EYE LINE angle
+                if dtilt < -TILT_THRESHOLD:
+                    cv2.putText(frame, "Tilt LEFT (left eye higher)", (10, y_offset),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    command_shown = True
+                    y_offset += 30
+                elif dtilt > TILT_THRESHOLD:
+                    cv2.putText(frame, "Tilt RIGHT (right eye higher)", (10, y_offset),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     command_shown = True
                     y_offset += 30
                 
@@ -410,16 +370,23 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
                 x, y = int(lm_point.x * w), int(lm_point.y * h)
                 cv2.circle(frame, (x, y), 1, (0, 255, 255), -1)
 
-            # Highlight pose landmarks
-            for idx in POSE_LANDMARKS:
-                x, y = int(lm[idx].x * w), int(lm[idx].y * h)
-                cv2.circle(frame, (x, y), 3, (255, 0, 255), -1)
+            # Highlight key landmarks
+            # Eyes (for tilt)
+            cv2.circle(frame, (int(lm[33].x * w), int(lm[33].y * h)), 5, (255, 0, 0), -1)  # Left eye
+            cv2.circle(frame, (int(lm[263].x * w), int(lm[263].y * h)), 5, (255, 0, 0), -1)  # Right eye
+            
+            # Mouth corners (for turn)
+            cv2.circle(frame, (int(lm[LEFT_MOUTH_CORNER].x * w), int(lm[LEFT_MOUTH_CORNER].y * h)), 5, (0, 255, 0), -1)
+            cv2.circle(frame, (int(lm[RIGHT_MOUTH_CORNER].x * w), int(lm[RIGHT_MOUTH_CORNER].y * h)), 5, (0, 255, 0), -1)
+            
+            # Face center points (for nod)
+            cv2.circle(frame, (int(lm[NOSE_TIP].x * w), int(lm[NOSE_TIP].y * h)), 5, (255, 255, 0), -1)
+            cv2.circle(frame, (int(lm[CHIN].x * w), int(lm[CHIN].y * h)), 5, (255, 255, 0), -1)
 
         else:
             cv2.putText(frame, "No face detected", (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
 
-        # Instructions at bottom - EMPHASIZE RECENTER
         cv2.putText(frame, ">>> PRESS 'r' TO RECENTER <<< | m=mirror | q=quit", 
                    (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
@@ -429,26 +396,20 @@ def main(camera_index: int = 0, mirror: bool = True) -> None:
         if key == ord('q'):
             break
         elif key == ord('r'):
-            # RECENTER
             if result.multi_face_landmarks and success:
-                # Set current position as new center
-                yaw0 = yaw
-                pitch0 = pitch
-                roll0 = roll
                 face_center_y0 = face_center_y
-                eye_mouth_dist0 = eye_mouth_dist
+                mouth_center_x0 = mouth_center_x
+                tilt_angle0 = tilt_angle
                 
-                # Create brand new filters
-                yaw_filter = SmoothingFilter(alpha=0.4)
-                pitch_filter = SmoothingFilter(alpha=0.4)
-                roll_filter = SmoothingFilter(alpha=0.4)
-                face_y_filter = SmoothingFilter(alpha=0.4)
-                tilt_filter = SmoothingFilter(alpha=0.4)
+                face_y_filter = SmoothingFilter(alpha=0.3)
+                mouth_x_filter = SmoothingFilter(alpha=0.3)
+                tilt_filter = SmoothingFilter(alpha=0.3)
                 
                 print(f"\n✅ RECENTERED SUCCESSFULLY!")
-                print(f"   Angles: yaw={np.degrees(yaw0):.1f}° pitch={np.degrees(pitch0):.1f}° roll={np.degrees(roll0):.1f}°")
-                print(f"   Face Y: {face_center_y0:.1f}px, Eye-mouth: {eye_mouth_dist0:.1f}px")
-                print(f"   All deltas should now be GREEN (in deadzone)")
+                print(f"   Face Y: {face_center_y0:.1f}px (for NOD)")
+                print(f"   Mouth X: {mouth_center_x0:.1f}px (for TURN)")
+                print(f"   Tilt: {np.degrees(tilt_angle0):.1f}° (for TILT)")
+                print(f"   All deltas should now be GREEN and 0.00")
             else:
                 print("\n⚠️  Cannot recenter - no face detected")
         elif key == ord('m'):
