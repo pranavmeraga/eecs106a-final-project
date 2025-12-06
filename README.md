@@ -124,6 +124,107 @@ ros2 run topic_tools relay /base_joint_cmd /ur_driver/base_cmd
 ros2 run topic_tools relay /limb_joint_cmd /ur_driver/limb_cmd
 ```
 
+### Direct UR7e Joint Control with Facemesh
+
+This method directly controls UR7e joints using facemesh detection, similar to the keyboard controller but with head movements.
+
+#### Prerequisites
+1. **Enable UR7e Communication** (in a separate terminal):
+   ```bash
+   ros2 run ur7e_utils enable_comms
+   ```
+   Keep this terminal running to maintain connection with UR7e.
+
+2. **Tuck the Robot** (optional, for safe starting position):
+   ```bash
+   ros2 run ur7e_utils tuck
+   ```
+
+#### Running the Facemesh Control Node
+
+1. **Build the package** (if not already built):
+   ```bash
+   cd /path/to/eecs106a-final-project
+   colcon build
+   source install/setup.bash
+   ```
+
+2. **Run the facemesh control node**:
+   ```bash
+   # Using default camera (index 0)
+   ros2 run head_teleop facemesh_ur7e_control
+   
+   # Using a different camera (e.g., Logitech camera at index 1)
+   ros2 run head_teleop facemesh_ur7e_control --camera 1
+   
+   # Disable camera mirroring
+   ros2 run head_teleop facemesh_ur7e_control --no-mirror
+   ```
+
+3. **Control the robot**:
+   - The node will open an OpenCV window showing your face and detection status
+   - **Turn head left/right** → Controls `shoulder_pan_joint` (base rotation)
+   - **Nod up/down** → Controls `shoulder_lift_joint` (vertical movement)
+   - **Tilt head left/right** → Controls `elbow_joint` (forward/backward)
+   - **Long blink (>1s)** → Adjusts `wrist_1_joint`
+   - **Open mouth wide** → Emergency stop (holds current position)
+   - **Press 'r'** in the OpenCV window → Recenter neutral pose
+   - **Press 'q'** in the OpenCV window → Quit the node
+
+#### Control Mapping Details
+
+| Head Movement | Joint Controlled | Detection Method |
+|---------------|------------------|------------------|
+| Turn left/right | `shoulder_pan_joint` | Mouth horizontal position |
+| Nod up/down | `shoulder_lift_joint` | Face vertical position |
+| Tilt left/right | `elbow_joint` | Eye line angle |
+| Long blink | `wrist_1_joint` | Eye aspect ratio (EAR) |
+| Open mouth | Emergency stop | Mouth opening distance |
+
+#### Safety Notes
+
+⚠️ **IMPORTANT SAFETY WARNINGS:**
+- **DO NOT input random angles** - This will cause the robot to emergency stop
+- Always start with the robot in a **safe tuck position**
+- The node uses **incremental control** - it adjusts joint positions based on head movements from a neutral pose
+- **Open your mouth wide** to trigger emergency stop at any time
+- Keep the **e-stop button** accessible at all times
+- The node publishes trajectories with `time_from_start.sec = 5` for smooth motion
+
+#### Testing with Safe Joint Angles
+
+After running `ros2 run ur7e_utils tuck`, you can test with these safe joint angles:
+```bash
+# This command is for reference - the facemesh node controls joints incrementally
+# The safe test position is:
+# shoulder_pan: 4.1768, shoulder_lift: -2.2087, elbow: -1.2924
+# wrist_1: -1.1133, wrist_2: 1.4865, wrist_3: -2.8460
+```
+
+#### Troubleshooting
+
+**Camera not found:**
+- Check camera index: `ls /dev/video*` (Linux) or use system camera settings
+- Try different indices: `--camera 0`, `--camera 1`, etc.
+- For Logitech cameras, typically index 0 or 1
+
+**Robot not moving:**
+- Verify `enable_comms` is running
+- Check joint states: `ros2 topic echo /joint_states`
+- Verify trajectory publishing: `ros2 topic echo /scaled_joint_trajectory_controller/joint_trajectory`
+- Make sure you've recentered with 'r' key after starting
+
+**Face not detected:**
+- Ensure good lighting (front-facing, avoid backlighting)
+- Position face clearly in camera view
+- Check camera is working: `python facemesh_preview.py --camera 0`
+
+#### Differences from Keyboard Controller
+
+- **Incremental control**: Facemesh node adjusts joints incrementally based on head movements, while keyboard controller moves joints by fixed steps
+- **Continuous control**: Head movements provide smooth, continuous control vs. discrete key presses
+- **Safety features**: Built-in emergency stop via mouth opening detection
+
 ## Project Structure
 ```
 eecs106a-final-project/
@@ -132,7 +233,8 @@ eecs106a-final-project/
 │       ├── head_teleop/              # Python modules
 │       │   ├── __init__.py
 │       │   ├── head_pose_blink_node.py      # Vision processing
-│       │   └── head_teleop_mapper_node.py   # Command mapping
+│       │   ├── head_teleop_mapper_node.py   # Command mapping
+│       │   └── facemesh_ur7e_control_node.py # Direct UR7e joint control
 │       ├── launch/
 │       │   └── head_teleop_launch.py        # Launch file
 │       ├── test/

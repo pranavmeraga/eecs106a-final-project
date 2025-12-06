@@ -24,6 +24,7 @@ setup(
         'console_scripts': [
             'head_pose_blink = head_teleop.head_pose_blink_node:main',
             'head_mapper = head_teleop.head_teleop_mapper_node:main',
+            'facemesh_ur7e_control = head_teleop.facemesh_ur7e_control_node:main',
         ],
     },
 )
