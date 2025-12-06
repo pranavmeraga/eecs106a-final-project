@@ -149,7 +149,21 @@ This method directly controls UR7e joints using facemesh detection, similar to t
    source install/setup.bash
    ```
 
-2. **Run the facemesh control node**:
+2. **Run the facemesh control node** (choose one method):
+
+   **Method A: Using launch file (recommended)**
+   ```bash
+   # Using default camera (index 0) - shows live GUI
+   ros2 launch head_teleop facemesh_ur7e_control_launch.py
+   
+   # Using a different camera (e.g., Logitech camera at index 1)
+   ros2 launch head_teleop facemesh_ur7e_control_launch.py camera:=1
+   
+   # Disable camera mirroring
+   ros2 launch head_teleop facemesh_ur7e_control_launch.py camera:=1 no_mirror:=true
+   ```
+
+   **Method B: Direct node execution**
    ```bash
    # Using default camera (index 0)
    ros2 run head_teleop facemesh_ur7e_control
@@ -162,7 +176,12 @@ This method directly controls UR7e joints using facemesh detection, similar to t
    ```
 
 3. **Control the robot**:
-   - The node will open an OpenCV window showing your face and detection status
+   - The node will automatically open an **OpenCV GUI window** showing:
+     - **Live camera feed** with face mesh overlay
+     - **Real-time head movement deltas** (dNod, dTurn, dTilt) with color coding
+     - **Status indicators** (OK, Emergency Stop, Long Blink)
+     - **Eye aspect ratio (EAR)** and mouth status
+     - **Control instructions**
    - **Turn head left/right** → Controls `shoulder_pan_joint` (base rotation)
    - **Nod up/down** → Controls `shoulder_lift_joint` (vertical movement)
    - **Tilt head left/right** → Controls `elbow_joint` (forward/backward)
@@ -236,7 +255,8 @@ eecs106a-final-project/
 │       │   ├── head_teleop_mapper_node.py   # Command mapping
 │       │   └── facemesh_ur7e_control_node.py # Direct UR7e joint control
 │       ├── launch/
-│       │   └── head_teleop_launch.py        # Launch file
+│       │   ├── head_teleop_launch.py        # Launch file for head teleop
+│       │   └── facemesh_ur7e_control_launch.py # Launch file for UR7e control with GUI
 │       ├── test/
 │       │   ├── test_flake8.py
 │       │   ├── test_pep257.py
