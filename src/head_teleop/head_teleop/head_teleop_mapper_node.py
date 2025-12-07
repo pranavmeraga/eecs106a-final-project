@@ -54,14 +54,16 @@ class HeadTeleopMapperNode(Node):
         self.yaw_threshold = 0.08
         self.deadzone = 0.05
 
-        # Control gains
-        self.base_yaw_gain = 0.5
-        self.limb_pitch_gain = 0.5
-        self.limb_roll_gain = 0.5
+        # Control gains (increased for faster response)
+        self.base_yaw_gain = 1.5
+        self.limb_pitch_gain = 1.5
+        self.limb_roll_gain = 1.5
 
         # State
         self.last_grasp_time = 0.0
         self.grasp_cooldown = 2.0  # seconds
+        self.emergency_stop = False  # Toggle state for emergency stop
+        self.mouth_was_open = False  # Track previous mouth state for toggle
 
         self.get_logger().info("Head Teleop Mapper Node Started")
         self.get_logger().info("Control Mapping:")
@@ -125,27 +127,37 @@ class HeadTeleopMapperNode(Node):
         self.limb_twist_pub.publish(limb_twist)
 
     def blink_callback(self, msg: Int8):
-        """Process blink events."""
+        """Process blink events - trigger grasp once."""
         if msg.data == BLINK_LONG:
             current_time = self.get_clock().now().nanoseconds / 1e9
             if current_time - self.last_grasp_time > self.grasp_cooldown:
-                self.get_logger().info("✊ GRASP - Long Blink")
+                # Trigger grasp once (not toggle)
+                self.get_logger().info("✊ GRASP TRIGGERED - Long Blink")
                 grasp_msg = Bool()
-                grasp_msg.data = True
+                grasp_msg.data = True  # Send grasp command
                 self.grasp_pub.publish(grasp_msg)
                 self.last_grasp_time = current_time
 
     def mouth_callback(self, msg: Bool):
-        """Process mouth open for emergency stop."""
-        if msg.data:
-            self.get_logger().warn("🛑 EMERGENCY STOP - Mouth Open")
+        """Process mouth open for emergency stop toggle."""
+        # Toggle emergency stop on mouth open transition
+        if msg.data and not self.mouth_was_open:
+            # Mouth just opened - toggle emergency stop
+            self.emergency_stop = not self.emergency_stop
+            if self.emergency_stop:
+                self.get_logger().warn("🛑 EMERGENCY STOP ACTIVATED - Mouth Open")
+            else:
+                self.get_logger().info("✅ Emergency stop DEACTIVATED - Mouth Open")
             
-            # Publish stop
+            # Publish stop state
             stop_msg = Bool()
-            stop_msg.data = True
+            stop_msg.data = self.emergency_stop
             self.stop_pub.publish(stop_msg)
-            
-            # Publish zero velocities
+        
+        self.mouth_was_open = msg.data
+        
+        # If emergency stop is active, publish zero velocities
+        if self.emergency_stop:
             zero_twist = Twist()
             self.base_twist_pub.publish(zero_twist)
             self.limb_twist_pub.publish(zero_twist)

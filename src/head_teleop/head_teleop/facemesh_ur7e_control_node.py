@@ -180,12 +180,13 @@ class FacemeshUR7eControlNode(Node):
         self.mouth_x_filter = SmoothingFilter(alpha=0.3)
         self.tilt_filter = SmoothingFilter(alpha=0.3)
         
-        # Blink tracking - SENSITIVE for immediate grasp detection
+        # Blink tracking - trigger grasp once when held >1s
         self.eye_closed = False
         self.eye_close_start = 0.0
-        self.EAR_THRESH = 0.15  # LOWERED from 0.21 - more sensitive blink detection
-        self.GRASP_BLINK_TIME = 0.3  # REDUCED from 1.0 - triggers grasp immediately after 300ms blink
+        self.EAR_THRESH = 0.21  # Eye aspect ratio threshold
+        self.GRASP_BLINK_TIME = 1.0  # Hold blink for 1 second to trigger grasp
         self.blink_frames_count = 0  # Track consecutive blink frames
+        self.blink_triggered = False  # Track if we've already triggered this blink (one-time trigger)
         
         # Mouth tracking
         self.MOUTH_OPEN_THRESH = 0.03
@@ -201,15 +202,17 @@ class FacemeshUR7eControlNode(Node):
         self.TILT_DEADZONE = 0.05      # radians ~2.9°
         
         # Control gains - how much joint angle changes per pixel/radian
-        self.yaw_to_pan_gain = 0.05    # radians per pixel (turn → shoulder_pan) - INCREASED for faster response
-        self.pitch_to_lift_gain = 0.05  # radians per pixel (nod → shoulder_lift) - INCREASED for faster response
-        self.roll_to_elbow_gain = 1.0   # radians per radian (tilt → elbow) - INCREASED for faster response
+        self.yaw_to_pan_gain = 0.15    # radians per pixel (turn → shoulder_pan) - INCREASED for faster response
+        self.pitch_to_lift_gain = 0.15  # radians per pixel (nod → shoulder_lift) - INCREASED for faster response
+        self.roll_to_elbow_gain = 1.5   # radians per radian (tilt → elbow) - INCREASED for faster response
+        self.pitch_to_wrist_gain = 1.0  # radians per pixel (nod → wrist_1 counteraction) - NEW for wrist control
         
         # Max joint velocity limits (radians)
         self.max_joint_velocity = 0.5
         
-        # Emergency stop flag
+        # Emergency stop flag (toggle state)
         self.emergency_stop = False
+        self.mouth_was_open = False  # Track previous mouth state for toggle
         
         # Quit flag
         self.should_quit = False
@@ -335,37 +338,53 @@ class FacemeshUR7eControlNode(Node):
         
         now = time.time()
         long_blink = False
+        blink_duration = 0.0  # Track blink duration for display
         
         if ear < self.EAR_THRESH:
             if not self.eye_closed:
                 self.eye_closed = True
                 self.eye_close_start = now
                 self.blink_frames_count = 0
+                self.blink_triggered = False  # Reset trigger flag when eyes close
+                blink_duration = 0.0
             else:
                 self.blink_frames_count += 1
-                duration = now - self.eye_close_start
-                # Trigger grasp if held closed long enough (300ms at 60Hz = ~18 frames)
-                if duration >= self.GRASP_BLINK_TIME and self.blink_frames_count >= 15:
+                blink_duration = now - self.eye_close_start
+                # Trigger grasp once if held closed long enough (>1s)
+                # Only trigger once per blink event (when eyes are still closed)
+                if blink_duration >= self.GRASP_BLINK_TIME and not self.blink_triggered:
                     long_blink = True
-                    self.get_logger().info(f"🤏 GRASP TRIGGERED! (EAR={ear:.3f}, held for {duration:.2f}s)")
+                    self.blink_triggered = True  # Mark as triggered to prevent multiple triggers
+                    self.get_logger().info(f"🤏 GRASP TRIGGERED! (EAR={ear:.3f}, held for {blink_duration:.2f}s)")
         else:
             if self.eye_closed:
                 self.eye_closed = False
                 self.blink_frames_count = 0
+                self.blink_triggered = False  # Reset when eyes open
+            blink_duration = 0.0
         
-        # Detect mouth open (emergency stop)
+        # Detect mouth open (emergency stop TOGGLE)
         mouth_top = pts[MOUTH_TOP_IDX]
         mouth_bottom = pts[MOUTH_BOTTOM_IDX]
         mouth_dist = np.linalg.norm(mouth_top - mouth_bottom)
         relative_dist = mouth_dist / h
         mouth_open = relative_dist > self.MOUTH_OPEN_THRESH
         
-        if mouth_open:
-            self.emergency_stop = True
-            self.get_logger().warn("🛑 EMERGENCY STOP - Mouth Open")
+        # Toggle emergency stop on mouth open transition (open once toggles on, open again toggles off)
+        if mouth_open and not self.mouth_was_open:
+            # Mouth just opened - toggle emergency stop
+            self.emergency_stop = not self.emergency_stop
+            if self.emergency_stop:
+                self.get_logger().warn("🛑 EMERGENCY STOP ACTIVATED - Mouth Open")
+            else:
+                self.get_logger().info("✅ Emergency stop DEACTIVATED - Mouth Open")
+        
+        self.mouth_was_open = mouth_open
+        
+        if self.emergency_stop:
             self.publish_zero_trajectory()
             # Still show the display
-            self.draw_overlay(frame, dnod, dturn, dtilt, ear, mouth_open, long_blink)
+            self.draw_overlay(frame, dnod, dturn, dtilt, ear, mouth_open, long_blink, 0.0)
             self.draw_mesh(frame, result, lm, pts, w, h)
             
             try:
@@ -381,11 +400,6 @@ class FacemeshUR7eControlNode(Node):
                 self.get_logger().warn(f"Display error: {e}", throttle_duration_sec=5.0)
             return
         
-        # Reset emergency stop if mouth closes
-        if self.emergency_stop and not mouth_open:
-            self.emergency_stop = False
-            self.get_logger().info("✅ Emergency stop released")
-        
         # Check if we should start publishing (either got joint states or timeout)
         if not self.got_joint_states:
             if time.time() > self.joint_states_timeout:
@@ -397,7 +411,7 @@ class FacemeshUR7eControlNode(Node):
             else:
                 self.get_logger().warn("Waiting for joint states...", throttle_duration_sec=2.0)
                 # Still show display while waiting
-                self.draw_overlay(frame, dnod, dturn, dtilt, ear, mouth_open, long_blink)
+                self.draw_overlay(frame, dnod, dturn, dtilt, ear, mouth_open, long_blink, 0.0)
                 self.draw_mesh(frame, result, lm, pts, w, h)
                 
                 try:
@@ -426,25 +440,32 @@ class FacemeshUR7eControlNode(Node):
         if abs(dnod) > self.NOD_DEADZONE:
             delta_lift = -dnod * self.pitch_to_lift_gain  # Negative because nod up should lift
             new_positions[1] += delta_lift
+            
+            # Wrist counteraction: move wrist_1_joint opposite to shoulder_lift to keep gripper at 90deg
+            # When nodding down (dnod > 0), shoulder_lift goes down (negative delta_lift)
+            # To keep gripper perpendicular, wrist should rotate opposite to shoulder movement
+            # So when shoulder goes down, wrist goes up (positive) to counteract
+            delta_wrist = -delta_lift * self.pitch_to_wrist_gain  # Opposite to shoulder_lift movement
+            new_positions[3] += delta_wrist  # wrist_1_joint counteracts pitch
         
         # Tilt (roll) → elbow_joint
         if abs(dtilt) > self.TILT_DEADZONE:
             delta_elbow = dtilt * self.roll_to_elbow_gain
             new_positions[2] += delta_elbow
         
-        # Long blink → GRASP! Execute strong grasp command
+        # Long blink → GRASP! Execute one-time grasp command
         if long_blink:
-            # Strong grasp: move wrist joints significantly to close gripper
-            new_positions[3] += 1.5  # LARGE adjustment for aggressive grasp (was 0.1)
+            # Strong grasp: move wrist joints significantly to close gripper (one-time command)
+            new_positions[3] += 1.5  # LARGE adjustment for aggressive grasp
             new_positions[4] += 0.3  # Also adjust wrist_2_joint for better grasp
             new_positions[5] -= 0.3  # Adjust wrist_3_joint
-            self.get_logger().info("✊✊✊ GRASP COMMAND EXECUTED! Closing gripper with force...")
+            self.get_logger().info("✊✊✊ GRASP COMMAND EXECUTED! Closing gripper...")
         
         # Publish trajectory
         self.publish_trajectory(new_positions)
         
         # Update display with overlay and show window
-        self.draw_overlay(frame, dnod, dturn, dtilt, ear, mouth_open, long_blink)
+        self.draw_overlay(frame, dnod, dturn, dtilt, ear, mouth_open, long_blink, blink_duration)
         self.draw_mesh(frame, result, lm, pts, w, h)
         
         try:
@@ -470,7 +491,7 @@ class FacemeshUR7eControlNode(Node):
         except Exception as e:
             self.get_logger().warn(f"Display error: {e}", throttle_duration_sec=5.0)
     
-    def draw_overlay(self, frame, dnod, dturn, dtilt, ear, mouth_open, long_blink):
+    def draw_overlay(self, frame, dnod, dturn, dtilt, ear, mouth_open, long_blink, blink_duration):
         """Draw comprehensive overlay information on frame (from facemesh_preview)."""
         h, w = frame.shape[:2]
         y_offset = 30
@@ -561,10 +582,10 @@ class FacemeshUR7eControlNode(Node):
         
         if ear < self.EAR_THRESH:
             if long_blink:
-                blink_status = "✊✊✊ GRASPING! ✊✊✊"
+                blink_status = "✊✊✊ GRASP TRIGGERED! ✊✊✊"
                 blink_color = (0, 0, 255)  # Red - active grasp!
             else:
-                blink_status = f"Eyes closed - Hold for grasp! (EAR={ear:.3f})"
+                blink_status = f"Eyes closed - Hold for >1s to grasp! ({blink_duration:.1f}s, EAR={ear:.3f})"
                 blink_color = (0, 165, 255)  # Orange - blink detected
         else:
             blink_status = f"Eyes open (EAR={ear:.3f})"
@@ -574,10 +595,13 @@ class FacemeshUR7eControlNode(Node):
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, blink_color, 3)  # Larger text for grasp status
         y_offset += 25
 
-        # Mouth detection
-        if mouth_open:
-            cv2.putText(frame, "STOP (mouth open)", (10, y_offset),
+        # Mouth detection (toggle state)
+        if self.emergency_stop:
+            cv2.putText(frame, f"STOP ACTIVE (toggle: open mouth again to release)", (10, y_offset),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        elif mouth_open:
+            cv2.putText(frame, "Mouth open (will toggle stop)", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
         else:
             cv2.putText(frame, "Mouth closed", (10, y_offset),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
@@ -619,8 +643,8 @@ class FacemeshUR7eControlNode(Node):
         point = JointTrajectoryPoint()
         point.positions = [float(p) for p in positions]
         point.velocities = [0.0] * 6
-        # Fast trajectory execution: 100ms per command for real-time response
-        point.time_from_start = Duration(sec=0, nanosec=100000000)  # 100ms in nanoseconds
+        # Fast trajectory execution: 50ms per command for real-time response (faster)
+        point.time_from_start = Duration(sec=0, nanosec=50000000)  # 50ms in nanoseconds
         traj.points.append(point)
         
         self.pub.publish(traj)
