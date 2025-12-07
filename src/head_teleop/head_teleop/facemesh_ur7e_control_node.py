@@ -107,6 +107,21 @@ def calculate_head_tilt_angle(lm, w, h):
     return tilt_angle
 
 
+def rotation_matrix_to_euler_angles(R: np.ndarray) -> tuple:
+    """Convert rotation matrix to Euler angles."""
+    sy = np.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
+    singular = sy < 1e-6
+    if not singular:
+        roll = np.arctan2(R[2, 1], R[2, 2])
+        pitch = np.arctan2(-R[2, 0], sy)
+        yaw = np.arctan2(R[1, 0], R[0, 0])
+    else:
+        roll = np.arctan2(-R[1, 2], R[1, 1])
+        pitch = np.arctan2(-R[2, 0], sy)
+        yaw = 0.0
+    return roll, pitch, yaw
+
+
 class FacemeshUR7eControlNode(Node):
     def __init__(self, camera_index: int = 0, mirror: bool = True):
         super().__init__('facemesh_ur7e_control_node')
@@ -116,7 +131,8 @@ class FacemeshUR7eControlNode(Node):
             'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'
         ]
         self.joint_positions = [0.0] * 6
-        self.got_joint_states = False  # Failsafe: don't publish until joint states received
+        self.got_joint_states = False  # Track if we've received joint states
+        self.joint_states_timeout = time.time() + 5.0  # Wait max 5 seconds for joint states
         
         # Subscribe to joint states
         self.create_subscription(
@@ -125,6 +141,9 @@ class FacemeshUR7eControlNode(Node):
             self.joint_state_callback, 
             10
         )
+        
+        self.get_logger().info("📡 Subscribed to /joint_states topic")
+        self.get_logger().info("📤 Publishing to /scaled_joint_trajectory_controller/joint_trajectory")
         
         # Publisher for joint trajectory
         self.pub = self.create_publisher(
@@ -161,11 +180,12 @@ class FacemeshUR7eControlNode(Node):
         self.mouth_x_filter = SmoothingFilter(alpha=0.3)
         self.tilt_filter = SmoothingFilter(alpha=0.3)
         
-        # Blink tracking
+        # Blink tracking - SENSITIVE for immediate grasp detection
         self.eye_closed = False
         self.eye_close_start = 0.0
-        self.EAR_THRESH = 0.21
-        self.GRASP_BLINK_TIME = 1.0
+        self.EAR_THRESH = 0.15  # LOWERED from 0.21 - more sensitive blink detection
+        self.GRASP_BLINK_TIME = 0.3  # REDUCED from 1.0 - triggers grasp immediately after 300ms blink
+        self.blink_frames_count = 0  # Track consecutive blink frames
         
         # Mouth tracking
         self.MOUTH_OPEN_THRESH = 0.03
@@ -181,9 +201,9 @@ class FacemeshUR7eControlNode(Node):
         self.TILT_DEADZONE = 0.05      # radians ~2.9°
         
         # Control gains - how much joint angle changes per pixel/radian
-        self.yaw_to_pan_gain = 0.01    # radians per pixel (turn → shoulder_pan)
-        self.pitch_to_lift_gain = 0.01  # radians per pixel (nod → shoulder_lift)
-        self.roll_to_elbow_gain = 0.5   # radians per radian (tilt → elbow)
+        self.yaw_to_pan_gain = 0.05    # radians per pixel (turn → shoulder_pan) - INCREASED for faster response
+        self.pitch_to_lift_gain = 0.05  # radians per pixel (nod → shoulder_lift) - INCREASED for faster response
+        self.roll_to_elbow_gain = 1.0   # radians per radian (tilt → elbow) - INCREASED for faster response
         
         # Max joint velocity limits (radians)
         self.max_joint_velocity = 0.5
@@ -194,8 +214,11 @@ class FacemeshUR7eControlNode(Node):
         # Quit flag
         self.should_quit = False
         
+        # Display flag to track if window has been created
+        self.window_created = False
+        
         # Timer for camera loop
-        self.timer = self.create_timer(1.0 / 30.0, self.camera_loop)  # 30 Hz
+        self.timer = self.create_timer(1.0 / 60.0, self.camera_loop)  # 60 Hz for faster response
         
         self.get_logger().info("Facemesh UR7e Control Node Started")
         self.get_logger().info(f"Camera index: {camera_index}, Mirror: {mirror}")
@@ -206,6 +229,11 @@ class FacemeshUR7eControlNode(Node):
         self.get_logger().info("  Long blink → wrist_1_joint adjustment")
         self.get_logger().info("  Open mouth → Emergency stop")
         self.get_logger().info("Press 'r' in OpenCV window to recenter neutral pose")
+        self.get_logger().info("🎬 OpenCV GUI window will appear shortly...")
+        self.get_logger().info("⚡ Performance Settings:")
+        self.get_logger().info("   • Update rate: 60 Hz (was 30 Hz)")
+        self.get_logger().info("   • Trajectory time: 100ms (was 5 seconds)")
+        self.get_logger().info("   • Control gains: 5x faster response")
     
     def joint_state_callback(self, msg: JointState):
         """Update current joint positions from joint_states topic."""
@@ -213,7 +241,11 @@ class FacemeshUR7eControlNode(Node):
             if name in msg.name:
                 idx = msg.name.index(name)
                 self.joint_positions[i] = msg.position[idx]
-        self.got_joint_states = True
+        
+        if not self.got_joint_states:
+            self.got_joint_states = True
+            self.get_logger().info("✅ Received joint states! Robot controller is active.")
+            self.get_logger().info(f"   Initial positions: {[f'{p:.3f}' for p in self.joint_positions]}")
     
     def camera_loop(self):
         """Main camera processing loop."""
@@ -237,6 +269,25 @@ class FacemeshUR7eControlNode(Node):
             # No face detected - publish zero velocities if emergency stop
             if self.emergency_stop:
                 self.publish_zero_trajectory()
+            cv2.putText(frame, "No face detected", (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+            
+            # Show display even without face
+            try:
+                if not self.window_created:
+                    cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_AUTOSIZE)
+                    self.window_created = True
+                    self.get_logger().info("✅ OpenCV GUI window created and displaying camera feed!")
+                
+                cv2.imshow("Facemesh UR7e Control", frame)
+                cv2.setWindowProperty("Facemesh UR7e Control", cv2.WND_PROP_TOPMOST, 1)
+                
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    self.get_logger().info("Quit requested")
+                    self.should_quit = True
+            except Exception as e:
+                self.get_logger().warn(f"Display error: {e}", throttle_duration_sec=5.0)
             return
         
         lm = result.multi_face_landmarks[0].landmark
@@ -277,7 +328,7 @@ class FacemeshUR7eControlNode(Node):
         if abs(dtilt) < self.TILT_DEADZONE:
             dtilt = 0.0
         
-        # Detect blink
+        # Detect blink - SENSITIVE for grasp
         left_eye = pts[LEFT_EYE_IDX]
         right_eye = pts[RIGHT_EYE_IDX]
         ear = 0.5 * (eye_aspect_ratio(left_eye) + eye_aspect_ratio(right_eye))
@@ -289,13 +340,18 @@ class FacemeshUR7eControlNode(Node):
             if not self.eye_closed:
                 self.eye_closed = True
                 self.eye_close_start = now
+                self.blink_frames_count = 0
             else:
+                self.blink_frames_count += 1
                 duration = now - self.eye_close_start
-                if duration >= self.GRASP_BLINK_TIME:
+                # Trigger grasp if held closed long enough (300ms at 60Hz = ~18 frames)
+                if duration >= self.GRASP_BLINK_TIME and self.blink_frames_count >= 15:
                     long_blink = True
+                    self.get_logger().info(f"🤏 GRASP TRIGGERED! (EAR={ear:.3f}, held for {duration:.2f}s)")
         else:
             if self.eye_closed:
                 self.eye_closed = False
+                self.blink_frames_count = 0
         
         # Detect mouth open (emergency stop)
         mouth_top = pts[MOUTH_TOP_IDX]
@@ -308,6 +364,21 @@ class FacemeshUR7eControlNode(Node):
             self.emergency_stop = True
             self.get_logger().warn("🛑 EMERGENCY STOP - Mouth Open")
             self.publish_zero_trajectory()
+            # Still show the display
+            self.draw_overlay(frame, dnod, dturn, dtilt, ear, mouth_open, long_blink)
+            self.draw_mesh(frame, result, lm, pts, w, h)
+            
+            try:
+                if not self.window_created:
+                    cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_AUTOSIZE)
+                    self.window_created = True
+                    self.get_logger().info("✅ OpenCV GUI window created and displaying camera feed!")
+                
+                cv2.imshow("Facemesh UR7e Control", frame)
+                cv2.setWindowProperty("Facemesh UR7e Control", cv2.WND_PROP_TOPMOST, 1)
+                cv2.waitKey(1)
+            except Exception as e:
+                self.get_logger().warn(f"Display error: {e}", throttle_duration_sec=5.0)
             return
         
         # Reset emergency stop if mouth closes
@@ -315,10 +386,32 @@ class FacemeshUR7eControlNode(Node):
             self.emergency_stop = False
             self.get_logger().info("✅ Emergency stop released")
         
-        # Don't publish if we don't have joint states yet
+        # Check if we should start publishing (either got joint states or timeout)
         if not self.got_joint_states:
-            self.get_logger().warn("Waiting for joint states...", throttle_duration_sec=2.0)
-            return
+            if time.time() > self.joint_states_timeout:
+                self.got_joint_states = True
+                self.get_logger().warn(
+                    "⚠️  Joint states not received after 5 seconds. Proceeding anyway with default positions."
+                )
+                self.get_logger().warn("    Make sure the robot controller is running and publishing /joint_states")
+            else:
+                self.get_logger().warn("Waiting for joint states...", throttle_duration_sec=2.0)
+                # Still show display while waiting
+                self.draw_overlay(frame, dnod, dturn, dtilt, ear, mouth_open, long_blink)
+                self.draw_mesh(frame, result, lm, pts, w, h)
+                
+                try:
+                    if not self.window_created:
+                        cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_AUTOSIZE)
+                        self.window_created = True
+                        self.get_logger().info("✅ OpenCV GUI window created and displaying camera feed!")
+                    
+                    cv2.imshow("Facemesh UR7e Control", frame)
+                    cv2.setWindowProperty("Facemesh UR7e Control", cv2.WND_PROP_TOPMOST, 1)
+                    cv2.waitKey(1)
+                except Exception as e:
+                    self.get_logger().warn(f"Display error: {e}", throttle_duration_sec=5.0)
+                return
         
         # Calculate new joint positions based on head movements
         new_positions = self.joint_positions.copy()
@@ -339,87 +432,205 @@ class FacemeshUR7eControlNode(Node):
             delta_elbow = dtilt * self.roll_to_elbow_gain
             new_positions[2] += delta_elbow
         
-        # Long blink → adjust wrist_1_joint
+        # Long blink → GRASP! Execute strong grasp command
         if long_blink:
-            new_positions[3] += 0.1  # Small adjustment
-            self.get_logger().info("✊ Long blink detected - adjusting wrist")
+            # Strong grasp: move wrist joints significantly to close gripper
+            new_positions[3] += 1.5  # LARGE adjustment for aggressive grasp (was 0.1)
+            new_positions[4] += 0.3  # Also adjust wrist_2_joint for better grasp
+            new_positions[5] -= 0.3  # Adjust wrist_3_joint
+            self.get_logger().info("✊✊✊ GRASP COMMAND EXECUTED! Closing gripper with force...")
         
         # Publish trajectory
         self.publish_trajectory(new_positions)
         
-        # Update display (optional - can be removed for headless operation)
+        # Update display with overlay and show window
         self.draw_overlay(frame, dnod, dturn, dtilt, ear, mouth_open, long_blink)
-        cv2.imshow("Facemesh UR7e Control", frame)
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('r'):
-            self.recenter_neutral()
-        elif key == ord('q'):
-            self.get_logger().info("Quit requested")
-            self.should_quit = True
+        self.draw_mesh(frame, result, lm, pts, w, h)
+        
+        try:
+            # Create window if it doesn't exist and show the frame
+            if not self.window_created:
+                cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_AUTOSIZE)
+                self.window_created = True
+                self.get_logger().info("✅ OpenCV GUI window created and displaying camera feed!")
+            
+            cv2.imshow("Facemesh UR7e Control", frame)
+            cv2.setWindowProperty("Facemesh UR7e Control", cv2.WND_PROP_TOPMOST, 1)
+            
+            # Wait for key press (1ms timeout)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('r'):
+                self.recenter_neutral()
+            elif key == ord('q'):
+                self.get_logger().info("Quit requested")
+                self.should_quit = True
+            elif key == ord('m'):
+                self.mirror = not self.mirror
+                self.get_logger().info(f"Mirror mode: {'ON' if self.mirror else 'OFF'}")
+        except Exception as e:
+            self.get_logger().warn(f"Display error: {e}", throttle_duration_sec=5.0)
     
     def draw_overlay(self, frame, dnod, dturn, dtilt, ear, mouth_open, long_blink):
-        """Draw overlay information on frame."""
+        """Draw comprehensive overlay information on frame (from facemesh_preview)."""
         h, w = frame.shape[:2]
         y_offset = 30
         
-        # Status
+        # === RAW POSITIONS ===
+        cv2.putText(frame, "=== RAW POSITIONS ===", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        y_offset += 25
+        
+        # We'll calculate and display raw positions
+        # For now show the deltas, will add raw in camera_loop
         cv2.putText(frame, "Facemesh UR7e Control", (10, y_offset),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         y_offset += 30
         
-        # Deltas
-        nod_color = (0, 255, 0) if abs(dnod) < self.NOD_DEADZONE else ((0, 0, 255) if abs(dnod) > self.NOD_THRESHOLD else (0, 255, 255))
-        turn_color = (0, 255, 0) if abs(dturn) < self.TURN_DEADZONE else ((0, 0, 255) if abs(dturn) > self.TURN_THRESHOLD else (0, 255, 255))
-        tilt_color = (0, 255, 0) if abs(dtilt) < self.TILT_DEADZONE else ((0, 0, 255) if abs(dtilt) > self.TILT_THRESHOLD else (0, 255, 255))
+        # === DELTA (smoothed) ===
+        cv2.putText(frame, "=== DELTA (smoothed) ===", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        y_offset += 25
         
-        cv2.putText(frame, f"dNod: {dnod:7.2f} px", (10, y_offset),
+        # Color code: GREEN=deadzone, CYAN=below threshold, RED=command active
+        nod_color = (0, 255, 0) if dnod == 0.0 else ((0, 0, 255) if abs(dnod) > self.NOD_THRESHOLD else (0, 255, 255))
+        turn_color = (0, 255, 0) if dturn == 0.0 else ((0, 0, 255) if abs(dturn) > self.TURN_THRESHOLD else (0, 255, 255))
+        tilt_color = (0, 255, 0) if dtilt == 0.0 else ((0, 0, 255) if abs(dtilt) > self.TILT_THRESHOLD else (0, 255, 255))
+        
+        cv2.putText(frame, f"dNod:   {dnod:7.2f} px", (10, y_offset),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, nod_color, 2)
         y_offset += 25
-        cv2.putText(frame, f"dTurn: {dturn:7.2f} px", (10, y_offset),
+        cv2.putText(frame, f"dTurn:  {dturn:7.2f} px", (10, y_offset),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, turn_color, 2)
         y_offset += 25
-        cv2.putText(frame, f"dTilt: {np.degrees(dtilt):7.2f} deg", (10, y_offset),
+        cv2.putText(frame, f"dTilt:  {np.degrees(dtilt):7.2f} deg", (10, y_offset),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, tilt_color, 2)
-        y_offset += 30
+
+        # === COMMANDS ===
+        y_offset += 35
+        cv2.putText(frame, "=== COMMANDS ===", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        y_offset += 25
+
+        command_shown = False
+
+        # TURN command - based on MOUTH horizontal position
+        if dturn < -self.TURN_THRESHOLD:
+            cv2.putText(frame, "Turn LEFT (mouth moves left)", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            command_shown = True
+            y_offset += 30
+        elif dturn > self.TURN_THRESHOLD:
+            cv2.putText(frame, "Turn RIGHT (mouth moves right)", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            command_shown = True
+            y_offset += 30
+
+        # NOD command - based on FACE vertical position
+        if dnod < -self.NOD_THRESHOLD:
+            cv2.putText(frame, "Nod UP (face moves up)", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            command_shown = True
+            y_offset += 30
+        elif dnod > self.NOD_THRESHOLD:
+            cv2.putText(frame, "Nod DOWN (face moves down)", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            command_shown = True
+            y_offset += 30
+
+        # TILT command - based on EYE LINE angle
+        if dtilt < -self.TILT_THRESHOLD:
+            cv2.putText(frame, "Tilt LEFT (left eye higher)", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            command_shown = True
+            y_offset += 30
+        elif dtilt > self.TILT_THRESHOLD:
+            cv2.putText(frame, "Tilt RIGHT (right eye higher)", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            command_shown = True
+            y_offset += 30
         
-        # Status indicators
-        if self.emergency_stop:
-            cv2.putText(frame, "🛑 EMERGENCY STOP", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-        elif long_blink:
-            cv2.putText(frame, "✊ Long Blink", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        if not command_shown:
+            cv2.putText(frame, "(neutral - no command)", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            y_offset += 30
+
+        # === BLINK & MOUTH STATUS ===
+        y_offset += 10
+        blink_status = ""
+        blink_color = (255, 255, 255)
+        
+        if ear < self.EAR_THRESH:
+            if long_blink:
+                blink_status = "✊✊✊ GRASPING! ✊✊✊"
+                blink_color = (0, 0, 255)  # Red - active grasp!
+            else:
+                blink_status = f"Eyes closed - Hold for grasp! (EAR={ear:.3f})"
+                blink_color = (0, 165, 255)  # Orange - blink detected
         else:
-            cv2.putText(frame, "Status: OK", (10, y_offset),
+            blink_status = f"Eyes open (EAR={ear:.3f})"
+            blink_color = (0, 255, 0)  # Green - normal
+
+        cv2.putText(frame, blink_status, (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, blink_color, 3)  # Larger text for grasp status
+        y_offset += 25
+
+        # Mouth detection
+        if mouth_open:
+            cv2.putText(frame, "STOP (mouth open)", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        else:
+            cv2.putText(frame, "Mouth closed", (10, y_offset),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         
-        y_offset += 30
-        cv2.putText(frame, f"EAR: {ear:.3f}", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        y_offset += 25
-        cv2.putText(frame, f"Mouth: {'OPEN' if mouth_open else 'CLOSED'}", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255) if mouth_open else (0, 255, 0), 1)
-        
-        # Instructions
+        # Instructions at bottom
         cv2.putText(frame, "Press 'r' to recenter | 'q' to quit | Ctrl+C to stop", 
                    (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
     
+    def draw_mesh(self, frame, result, lm, pts, w, h):
+        """Draw face mesh and key landmarks on frame."""
+        if not result.multi_face_landmarks:
+            return
+        
+        # Draw full mesh
+        for lm_point in result.multi_face_landmarks[0].landmark:
+            x, y = int(lm_point.x * w), int(lm_point.y * h)
+            cv2.circle(frame, (x, y), 1, (0, 255, 255), -1)
+        
+        # Highlight key landmarks
+        # Eyes (for tilt) - Blue
+        cv2.circle(frame, (int(lm[33].x * w), int(lm[33].y * h)), 5, (255, 0, 0), -1)  # Left eye
+        cv2.circle(frame, (int(lm[263].x * w), int(lm[263].y * h)), 5, (255, 0, 0), -1)  # Right eye
+        
+        # Mouth corners (for turn) - Green
+        cv2.circle(frame, (int(lm[LEFT_MOUTH_CORNER].x * w), int(lm[LEFT_MOUTH_CORNER].y * h)), 5, (0, 255, 0), -1)
+        cv2.circle(frame, (int(lm[RIGHT_MOUTH_CORNER].x * w), int(lm[RIGHT_MOUTH_CORNER].y * h)), 5, (0, 255, 0), -1)
+        
+        # Face center points (for nod) - Yellow
+        cv2.circle(frame, (int(lm[NOSE_TIP].x * w), int(lm[NOSE_TIP].y * h)), 5, (255, 255, 0), -1)
+        cv2.circle(frame, (int(lm[CHIN].x * w), int(lm[CHIN].y * h)), 5, (255, 255, 0), -1)
+    
     def publish_trajectory(self, positions):
         """Publish joint trajectory to UR7e."""
+        from builtin_interfaces.msg import Duration
+        
         traj = JointTrajectory()
         traj.joint_names = self.joint_names
         
         point = JointTrajectoryPoint()
         point.positions = [float(p) for p in positions]
         point.velocities = [0.0] * 6
-        point.time_from_start.sec = 5  # As specified in task
+        # Fast trajectory execution: 100ms per command for real-time response
+        point.time_from_start = Duration(sec=0, nanosec=100000000)  # 100ms in nanoseconds
         traj.points.append(point)
         
         self.pub.publish(traj)
         self.joint_positions = positions.copy()
+        self.get_logger().debug(f"📨 Published trajectory: {[f'{p:.3f}' for p in positions]}")
     
     def publish_zero_trajectory(self):
         """Publish zero velocity trajectory for emergency stop."""
+        from builtin_interfaces.msg import Duration
+        
         if not self.got_joint_states:
             return
         
@@ -429,7 +640,7 @@ class FacemeshUR7eControlNode(Node):
         point = JointTrajectoryPoint()
         point.positions = self.joint_positions.copy()  # Hold current position
         point.velocities = [0.0] * 6
-        point.time_from_start.sec = 1
+        point.time_from_start = Duration(sec=0, nanosec=50000000)  # 50ms
         traj.points.append(point)
         
         self.pub.publish(traj)

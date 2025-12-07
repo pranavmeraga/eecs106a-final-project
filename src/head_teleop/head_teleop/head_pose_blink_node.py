@@ -241,7 +241,7 @@ class HeadPoseBlinkNode(Node):
         mouth_bottom = pts[self.mouth_bottom_idx]
         mouth_dist = np.linalg.norm(mouth_top - mouth_bottom)
         relative_dist = mouth_dist / frame_height
-        return relative_dist > self.MOUTH_OPEN_THRESH
+        return bool(relative_dist > self.MOUTH_OPEN_THRESH)
 
     def publish_head_pose(self, dyaw: float, dpitch: float, droll: float):
         """Publish head pose deltas: x=yaw, y=pitch, z=roll"""
