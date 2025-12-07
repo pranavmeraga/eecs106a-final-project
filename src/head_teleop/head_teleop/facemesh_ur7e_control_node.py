@@ -45,6 +45,12 @@ FOREHEAD = 10
 LEFT_MOUTH_CORNER = 61
 RIGHT_MOUTH_CORNER = 291
 
+# Eye landmarks for wink detection
+LEFT_EYE_INNER = 133
+LEFT_EYE_OUTER = 33
+RIGHT_EYE_INNER = 362
+RIGHT_EYE_OUTER = 263
+
 
 class SmoothingFilter:
     """Exponential moving average filter."""
@@ -105,6 +111,26 @@ def calculate_head_tilt_angle(lm, w, h):
     tilt_angle = np.arctan2(dy, dx)
     
     return tilt_angle
+
+
+def calculate_face_size(lm, w, h):
+    """Calculate face size as a measure of proximity to camera.
+    Returns normalized face size (0-1 scale, larger = closer to camera).
+    Uses forehead-to-chin distance and eye-to-eye distance for robust measurement."""
+    # Forehead to chin distance (vertical face size)
+    forehead_y = lm[FOREHEAD].y * h
+    chin_y = lm[CHIN].y * h
+    vertical_size = abs(chin_y - forehead_y)
+    
+    # Eye-to-eye distance (horizontal face size)
+    left_eye_x = lm[33].x * w
+    right_eye_x = lm[263].x * w
+    horizontal_size = abs(right_eye_x - left_eye_x)
+    
+    # Combined face size metric (normalized by frame size)
+    face_size = (vertical_size + horizontal_size) / (w + h)
+    
+    return face_size
 
 
 def rotation_matrix_to_euler_angles(R: np.ndarray) -> tuple:
@@ -174,11 +200,19 @@ class FacemeshUR7eControlNode(Node):
         self.face_center_y0 = 0.0
         self.mouth_center_x0 = 0.0
         self.tilt_angle0 = 0.0
+        self.face_size0 = 0.0  # Baseline face size for proximity detection
         
         # Smoothing filters
         self.face_y_filter = SmoothingFilter(alpha=0.3)
         self.mouth_x_filter = SmoothingFilter(alpha=0.3)
         self.tilt_filter = SmoothingFilter(alpha=0.3)
+        self.face_size_filter = SmoothingFilter(alpha=0.2)  # Slower filter for stable size measurement
+        
+        # 🎯 IMPRESSIVE: Proximity-Based Precision Mode
+        self.precision_mode = True  # True = fine control (close), False = coarse control (far)
+        self.face_size_threshold = 0.15  # Threshold for switching modes (normalized size)
+        self.precision_gain_multiplier = 0.3  # Fine control: 30% of normal speed
+        self.coarse_gain_multiplier = 2.0  # Coarse control: 200% of normal speed
         
         # Blink tracking - trigger grasp once when held >1s
         self.eye_closed = False
@@ -214,6 +248,32 @@ class FacemeshUR7eControlNode(Node):
         self.emergency_stop = False
         self.mouth_was_open = False  # Track previous mouth state for toggle
         
+        # 🎯 IMPRESSIVE FEATURES: Auto-Home Position
+        self.home_position = None  # Saved home position
+        self.returning_to_home = False
+        self.home_return_speed = 0.02  # Radians per update
+        
+        # 🎯 IMPRESSIVE FEATURES: Eye Wink Detection
+        self.left_eye_closed = False
+        self.right_eye_closed = False
+        self.left_wink_start = 0.0
+        self.right_wink_start = 0.0
+        self.WINK_TIME = 0.3  # Quick wink detection (300ms)
+        self.wink_cooldown = 1.0  # Cooldown between winks
+        self.last_wink_time = 0.0
+        
+        # 🎯 IMPRESSIVE FEATURES: Head Shake Detection (quick left-right)
+        self.head_shake_buffer = []  # Store recent head movements
+        self.shake_detection_window = 1.0  # seconds
+        self.SHAKE_THRESHOLD = 3  # Minimum number of direction changes
+        
+        # 🎯 IMPRESSIVE FEATURES: Movement Recording
+        self.recording = False
+        self.recorded_movements = []
+        self.recording_start_time = 0.0
+        self.playback_index = 0
+        self.playing_back = False
+        
         # Quit flag
         self.should_quit = False
         
@@ -229,14 +289,23 @@ class FacemeshUR7eControlNode(Node):
         self.get_logger().info("  Turn head LEFT/RIGHT → shoulder_pan_joint")
         self.get_logger().info("  Nod UP/DOWN → shoulder_lift_joint")
         self.get_logger().info("  Tilt LEFT/RIGHT → elbow_joint")
-        self.get_logger().info("  Long blink → wrist_1_joint adjustment")
-        self.get_logger().info("  Open mouth → Emergency stop")
+        self.get_logger().info("  Long blink (>1s) → Grasp command")
+        self.get_logger().info("  Open mouth → Emergency stop (toggle)")
         self.get_logger().info("Press 'r' in OpenCV window to recenter neutral pose")
         self.get_logger().info("🎬 OpenCV GUI window will appear shortly...")
         self.get_logger().info("⚡ Performance Settings:")
         self.get_logger().info("   • Update rate: 60 Hz (was 30 Hz)")
-        self.get_logger().info("   • Trajectory time: 100ms (was 5 seconds)")
-        self.get_logger().info("   • Control gains: 5x faster response")
+        self.get_logger().info("   • Trajectory time: 50ms (was 5 seconds)")
+        self.get_logger().info("   • Control gains: 3x faster response")
+        self.get_logger().info("🎯 IMPRESSIVE FEATURES:")
+        self.get_logger().info("   • Left Wink → Save home position")
+        self.get_logger().info("   • Right Wink → Return to home position")
+        self.get_logger().info("   • Head Shake (quick L-R) → Cancel operation")
+        self.get_logger().info("   • Wrist auto-counteraction for 90° gripper angle")
+        self.get_logger().info("   • 🎯 PROXIMITY-BASED PRECISION MODE:")
+        self.get_logger().info("      - Lean IN (close to camera) → Fine control (30% speed)")
+        self.get_logger().info("      - Lean BACK (far from camera) → Coarse control (200% speed)")
+        self.get_logger().info("      - Automatic switching based on face size")
     
     def joint_state_callback(self, msg: JointState):
         """Update current joint positions from joint_states topic."""
@@ -300,17 +369,20 @@ class FacemeshUR7eControlNode(Node):
         face_center_y = calculate_face_center_y(lm, h)
         mouth_center_x = calculate_mouth_horizontal_position(lm, w)
         tilt_angle = calculate_head_tilt_angle(lm, w, h)
+        face_size = calculate_face_size(lm, w, h)  # 🎯 Proximity detection
         
         # Set neutral pose on first frame
         if not self.neutral_set:
             self.face_center_y0 = face_center_y
             self.mouth_center_x0 = mouth_center_x
             self.tilt_angle0 = tilt_angle
+            self.face_size0 = face_size
             self.neutral_set = True
             self.get_logger().info(
                 f"Neutral pose set: Face Y={self.face_center_y0:.1f}px, "
                 f"Mouth X={self.mouth_center_x0:.1f}px, "
-                f"Tilt={np.degrees(self.tilt_angle0):.1f}°"
+                f"Tilt={np.degrees(self.tilt_angle0):.1f}°, "
+                f"Face Size={self.face_size0:.4f}"
             )
         
         # Calculate deltas
@@ -323,6 +395,24 @@ class FacemeshUR7eControlNode(Node):
         dturn = self.mouth_x_filter.update(dturn)
         dtilt = self.tilt_filter.update(dtilt)
         
+        # 🎯 IMPRESSIVE: Proximity-Based Precision Mode
+        # Calculate relative face size change (larger = closer, smaller = farther)
+        face_size_delta = face_size - self.face_size0
+        smoothed_size_delta = self.face_size_filter.update(face_size_delta)
+        
+        # Switch precision mode based on face size
+        # If face is significantly larger than baseline (leaned in) → precision mode
+        # If face is smaller or same (leaned back) → coarse mode
+        old_precision_mode = self.precision_mode
+        if smoothed_size_delta > self.face_size_threshold:
+            self.precision_mode = True  # Fine control (close to camera)
+        else:
+            self.precision_mode = False  # Coarse control (far from camera)
+        
+        if old_precision_mode != self.precision_mode:
+            mode_text = "PRECISION (Fine)" if self.precision_mode else "COARSE (Fast)"
+            self.get_logger().info(f"🎯 Mode switched to: {mode_text} (Face size delta: {smoothed_size_delta:.4f})")
+        
         # Apply deadzones
         if abs(dnod) < self.NOD_DEADZONE:
             dnod = 0.0
@@ -331,10 +421,70 @@ class FacemeshUR7eControlNode(Node):
         if abs(dtilt) < self.TILT_DEADZONE:
             dtilt = 0.0
         
-        # Detect blink - SENSITIVE for grasp
+        # Detect blink and winks
         left_eye = pts[LEFT_EYE_IDX]
         right_eye = pts[RIGHT_EYE_IDX]
-        ear = 0.5 * (eye_aspect_ratio(left_eye) + eye_aspect_ratio(right_eye))
+        left_ear = eye_aspect_ratio(left_eye)
+        right_ear = eye_aspect_ratio(right_eye)
+        ear = 0.5 * (left_ear + right_ear)
+        
+        # 🎯 IMPRESSIVE: Eye Wink Detection (left/right independent)
+        left_wink = False
+        right_wink = False
+        if left_ear < self.EAR_THRESH and right_ear >= self.EAR_THRESH:
+            # Only left eye closed = left wink
+            if not self.left_eye_closed:
+                self.left_eye_closed = True
+                self.left_wink_start = now
+            else:
+                if now - self.left_wink_start >= self.WINK_TIME and now - self.last_wink_time > self.wink_cooldown:
+                    left_wink = True
+                    self.last_wink_time = now
+        else:
+            self.left_eye_closed = False
+            
+        if right_ear < self.EAR_THRESH and left_ear >= self.EAR_THRESH:
+            # Only right eye closed = right wink
+            if not self.right_eye_closed:
+                self.right_eye_closed = True
+                self.right_wink_start = now
+            else:
+                if now - self.right_wink_start >= self.WINK_TIME and now - self.last_wink_time > self.wink_cooldown:
+                    right_wink = True
+                    self.last_wink_time = now
+        else:
+            self.right_eye_closed = False
+        
+        # Handle wink commands
+        if left_wink:
+            # Left wink = Save current position as home
+            if self.got_joint_states:
+                self.home_position = self.joint_positions.copy()
+                self.get_logger().info("🏠 HOME POSITION SAVED! (Left Wink)")
+        if right_wink:
+            # Right wink = Return to home position
+            if self.home_position is not None and self.got_joint_states:
+                self.returning_to_home = True
+                self.get_logger().info("🏠 RETURNING TO HOME POSITION... (Right Wink)")
+        
+        # 🎯 IMPRESSIVE: Head Shake Detection (quick left-right for cancel)
+        if abs(dturn) > self.TURN_THRESHOLD:
+            direction = 1 if dturn > 0 else -1
+            self.head_shake_buffer.append((now, direction))
+            # Keep only recent movements (within detection window)
+            self.head_shake_buffer = [(t, d) for t, d in self.head_shake_buffer if now - t < self.shake_detection_window]
+            
+            # Detect shake pattern (alternating directions)
+            if len(self.head_shake_buffer) >= self.SHAKE_THRESHOLD:
+                directions = [d for _, d in self.head_shake_buffer]
+                changes = sum(1 for i in range(1, len(directions)) if directions[i] != directions[i-1])
+                if changes >= self.SHAKE_THRESHOLD - 1:
+                    # Head shake detected - cancel current operation
+                    self.returning_to_home = False
+                    self.playing_back = False
+                    self.recording = False
+                    self.head_shake_buffer.clear()
+                    self.get_logger().info("❌ OPERATION CANCELLED! (Head Shake)")
         
         now = time.time()
         long_blink = False
@@ -430,28 +580,50 @@ class FacemeshUR7eControlNode(Node):
         # Calculate new joint positions based on head movements
         new_positions = self.joint_positions.copy()
         
-        # Map head movements to joints
-        # Turn (yaw) → shoulder_pan_joint
-        if abs(dturn) > self.TURN_DEADZONE:
-            delta_pan = dturn * self.yaw_to_pan_gain
-            new_positions[0] += delta_pan
-        
-        # Nod (pitch) → shoulder_lift_joint
-        if abs(dnod) > self.NOD_DEADZONE:
-            delta_lift = -dnod * self.pitch_to_lift_gain  # Negative because nod up should lift
-            new_positions[1] += delta_lift
+        # 🎯 IMPRESSIVE: Auto-Home Return (if activated)
+        if self.returning_to_home and self.home_position is not None:
+            # Smoothly interpolate to home position
+            all_at_home = True
+            for i in range(len(new_positions)):
+                diff = self.home_position[i] - new_positions[i]
+                if abs(diff) > 0.01:  # Not at home yet
+                    all_at_home = False
+                    # Move towards home
+                    step = np.sign(diff) * min(abs(diff), self.home_return_speed)
+                    new_positions[i] += step
+                else:
+                    new_positions[i] = self.home_position[i]
             
-            # Wrist counteraction: move wrist_1_joint opposite to shoulder_lift to keep gripper at 90deg
-            # When nodding down (dnod > 0), shoulder_lift goes down (negative delta_lift)
-            # To keep gripper perpendicular, wrist should rotate opposite to shoulder movement
-            # So when shoulder goes down, wrist goes up (positive) to counteract
-            delta_wrist = -delta_lift * self.pitch_to_wrist_gain  # Opposite to shoulder_lift movement
-            new_positions[3] += delta_wrist  # wrist_1_joint counteracts pitch
-        
-        # Tilt (roll) → elbow_joint
-        if abs(dtilt) > self.TILT_DEADZONE:
-            delta_elbow = dtilt * self.roll_to_elbow_gain
-            new_positions[2] += delta_elbow
+            if all_at_home:
+                self.returning_to_home = False
+                self.get_logger().info("✅ ARRIVED AT HOME POSITION!")
+        else:
+            # Normal head movement control with proximity-based precision
+            # 🎯 Apply precision/coarse mode multiplier
+            gain_multiplier = self.precision_gain_multiplier if self.precision_mode else self.coarse_gain_multiplier
+            
+            # Map head movements to joints
+            # Turn (yaw) → shoulder_pan_joint
+            if abs(dturn) > self.TURN_DEADZONE:
+                delta_pan = dturn * self.yaw_to_pan_gain * gain_multiplier
+                new_positions[0] += delta_pan
+            
+            # Nod (pitch) → shoulder_lift_joint
+            if abs(dnod) > self.NOD_DEADZONE:
+                delta_lift = -dnod * self.pitch_to_lift_gain * gain_multiplier  # Negative because nod up should lift
+                new_positions[1] += delta_lift
+                
+                # Wrist counteraction: move wrist_1_joint opposite to shoulder_lift to keep gripper at 90deg
+                # When nodding down (dnod > 0), shoulder_lift goes down (negative delta_lift)
+                # To keep gripper perpendicular, wrist should rotate opposite to shoulder movement
+                # So when shoulder goes down, wrist goes up (positive) to counteract
+                delta_wrist = -delta_lift * self.pitch_to_wrist_gain  # Wrist counteraction always uses same gain
+                new_positions[3] += delta_wrist  # wrist_1_joint counteracts pitch
+            
+            # Tilt (roll) → elbow_joint
+            if abs(dtilt) > self.TILT_DEADZONE:
+                delta_elbow = dtilt * self.roll_to_elbow_gain * gain_multiplier
+                new_positions[2] += delta_elbow
         
         # Long blink → GRASP! Execute one-time grasp command
         if long_blink:
@@ -605,6 +777,52 @@ class FacemeshUR7eControlNode(Node):
         else:
             cv2.putText(frame, "Mouth closed", (10, y_offset),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        y_offset += 30
+        
+        # 🎯 IMPRESSIVE FEATURES DISPLAY
+        y_offset += 10
+        cv2.putText(frame, "=== 🎯 ADVANCED FEATURES ===", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        y_offset += 25
+        
+        # Home position status
+        if self.home_position is not None:
+            if self.returning_to_home:
+                cv2.putText(frame, "🏠 RETURNING TO HOME...", (10, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            else:
+                cv2.putText(frame, "🏠 Home saved (Right wink to return)", (10, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        else:
+            cv2.putText(frame, "🏠 No home saved (Left wink to save)", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
+        y_offset += 25
+        
+        # Wink detection status
+        if self.left_eye_closed and not self.right_eye_closed:
+            cv2.putText(frame, "👁️ LEFT WINK DETECTED", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2)
+            y_offset += 25
+        elif self.right_eye_closed and not self.left_eye_closed:
+            cv2.putText(frame, "👁️ RIGHT WINK DETECTED", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2)
+            y_offset += 25
+        
+        # Head shake status
+        if len(self.head_shake_buffer) > 0:
+            cv2.putText(frame, f"↔️ Shake detected: {len(self.head_shake_buffer)} moves", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            y_offset += 25
+        
+        # 🎯 IMPRESSIVE: Proximity-Based Precision Mode Display
+        y_offset += 10
+        mode_text = "PRECISION MODE (Fine Control)" if self.precision_mode else "COARSE MODE (Fast Control)"
+        mode_color = (0, 255, 255) if self.precision_mode else (255, 165, 0)  # Cyan for precision, Orange for coarse
+        cv2.putText(frame, f"🎯 {mode_text}", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, mode_color, 2)
+        y_offset += 25
+        cv2.putText(frame, f"   Lean IN for precision | Lean BACK for speed", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         
         # Instructions at bottom
         cv2.putText(frame, "Press 'r' to recenter | 'q' to quit | Ctrl+C to stop", 
