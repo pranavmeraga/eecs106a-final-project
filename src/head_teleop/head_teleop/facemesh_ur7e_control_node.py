@@ -13,9 +13,9 @@ Publishes:
 
 Control Mapping:
 - Turn head left/right (yaw) → shoulder_pan_joint
-- Nod up/down (pitch) → shoulder_lift_joint
+- Nod up/down (pitch) → shoulder_lift_joint and shoulder_pan_joint (extend/retract, wrist stays perpendicular)
 - Tilt head left/right (roll) → elbow_joint
-- Long blink → wrist_1_joint adjustment
+- Long blink → Grasp command (wrist joints)
 - Open mouth → Emergency stop (zero velocities)
 """
 
@@ -287,22 +287,21 @@ class FacemeshUR7eControlNode(Node):
         self.get_logger().info(f"Camera index: {camera_index}, Mirror: {mirror}")
         self.get_logger().info("Control Mapping:")
         self.get_logger().info("  Turn head LEFT/RIGHT → shoulder_pan_joint")
-        self.get_logger().info("  Nod UP/DOWN → shoulder_lift_joint")
+        self.get_logger().info("  Nod UP/DOWN → shoulder_lift_joint + shoulder_pan_joint (extend/retract, wrist stays perpendicular)")
         self.get_logger().info("  Tilt LEFT/RIGHT → elbow_joint")
         self.get_logger().info("  Long blink (>1s) → Grasp command")
         self.get_logger().info("  Open mouth → Emergency stop (toggle)")
         self.get_logger().info("Press 'r' in OpenCV window to recenter neutral pose")
-        self.get_logger().info("🎬 OpenCV GUI window will appear shortly...")
-        self.get_logger().info("⚡ Performance Settings:")
+        self.get_logger().info("OpenCV GUI window will appear shortly...")
+        self.get_logger().info("Performance Settings:")
         self.get_logger().info("   • Update rate: 60 Hz (was 30 Hz)")
         self.get_logger().info("   • Trajectory time: 50ms (was 5 seconds)")
         self.get_logger().info("   • Control gains: 3x faster response")
-        self.get_logger().info("🎯 IMPRESSIVE FEATURES:")
+        self.get_logger().info("IMPRESSIVE FEATURES:")
         self.get_logger().info("   • Left Wink → Save home position")
         self.get_logger().info("   • Right Wink → Return to home position")
         self.get_logger().info("   • Head Shake (quick L-R) → Cancel operation")
-        self.get_logger().info("   • Wrist auto-counteraction for 90° gripper angle")
-        self.get_logger().info("   • 🎯 PROXIMITY-BASED PRECISION MODE:")
+        self.get_logger().info("   • PROXIMITY-BASED PRECISION MODE:")
         self.get_logger().info("      - Lean IN (close to camera) → Fine control (30% speed)")
         self.get_logger().info("      - Lean BACK (far from camera) → Coarse control (200% speed)")
         self.get_logger().info("      - Automatic switching based on face size")
@@ -608,17 +607,16 @@ class FacemeshUR7eControlNode(Node):
                 delta_pan = dturn * self.yaw_to_pan_gain * gain_multiplier
                 new_positions[0] += delta_pan
             
-            # Nod (pitch) → shoulder_lift_joint
+            # Nod (pitch) → shoulder_lift_joint and shoulder_pan_joint (extend/retract)
+            # Nod up (dnod < 0) = extend, Nod down (dnod > 0) = retract
+            # Wrist stays perpendicular (no wrist movement during extend/retract)
             if abs(dnod) > self.NOD_DEADZONE:
-                delta_lift = -dnod * self.pitch_to_lift_gain * gain_multiplier  # Negative because nod up should lift
+                delta_lift = dnod * self.pitch_to_lift_gain * gain_multiplier  # Nod up extends (decreases lift), nod down retracts (increases lift)
                 new_positions[1] += delta_lift
-                
-                # Wrist counteraction: move wrist_1_joint opposite to shoulder_lift to keep gripper at 90deg
-                # When nodding down (dnod > 0), shoulder_lift goes down (negative delta_lift)
-                # To keep gripper perpendicular, wrist should rotate opposite to shoulder movement
-                # So when shoulder goes down, wrist goes up (positive) to counteract
-                delta_wrist = -delta_lift * self.pitch_to_wrist_gain  # Wrist counteraction always uses same gain
-                new_positions[3] += delta_wrist  # wrist_1_joint counteracts pitch
+                # Both shoulder joints move together for extend/retract
+                # shoulder_pan_joint also moves slightly to coordinate with shoulder_lift
+                delta_pan_coord = dnod * self.pitch_to_lift_gain * gain_multiplier * 0.3  # Smaller movement for coordination
+                new_positions[0] += delta_pan_coord
             
             # Tilt (roll) → elbow_joint
             if abs(dtilt) > self.TILT_DEADZONE:
@@ -668,21 +666,15 @@ class FacemeshUR7eControlNode(Node):
         h, w = frame.shape[:2]
         y_offset = 30
         
-        # === RAW POSITIONS ===
-        cv2.putText(frame, "=== RAW POSITIONS ===", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        y_offset += 25
-        
-        # We'll calculate and display raw positions
-        # For now show the deltas, will add raw in camera_loop
+        # === TITLE ===
         cv2.putText(frame, "Facemesh UR7e Control", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        y_offset += 30
+                   cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
+        y_offset += 40
         
         # === DELTA (smoothed) ===
-        cv2.putText(frame, "=== DELTA (smoothed) ===", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        y_offset += 25
+        cv2.putText(frame, "DELTA (smoothed)", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        y_offset += 35
         
         # Color code: GREEN=deadzone, CYAN=below threshold, RED=command active
         nod_color = (0, 255, 0) if dnod == 0.0 else ((0, 0, 255) if abs(dnod) > self.NOD_THRESHOLD else (0, 255, 255))
@@ -690,71 +682,71 @@ class FacemeshUR7eControlNode(Node):
         tilt_color = (0, 255, 0) if dtilt == 0.0 else ((0, 0, 255) if abs(dtilt) > self.TILT_THRESHOLD else (0, 255, 255))
         
         cv2.putText(frame, f"dNod:   {dnod:7.2f} px", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, nod_color, 2)
-        y_offset += 25
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, nod_color, 3)
+        y_offset += 35
         cv2.putText(frame, f"dTurn:  {dturn:7.2f} px", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, turn_color, 2)
-        y_offset += 25
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, turn_color, 3)
+        y_offset += 35
         cv2.putText(frame, f"dTilt:  {np.degrees(dtilt):7.2f} deg", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, tilt_color, 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, tilt_color, 3)
 
         # === COMMANDS ===
+        y_offset += 45
+        cv2.putText(frame, "COMMANDS", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         y_offset += 35
-        cv2.putText(frame, "=== COMMANDS ===", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        y_offset += 25
 
         command_shown = False
 
         # TURN command - based on MOUTH horizontal position
         if dturn < -self.TURN_THRESHOLD:
             cv2.putText(frame, "Turn LEFT (mouth moves left)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
             command_shown = True
-            y_offset += 30
+            y_offset += 40
         elif dturn > self.TURN_THRESHOLD:
             cv2.putText(frame, "Turn RIGHT (mouth moves right)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
             command_shown = True
-            y_offset += 30
+            y_offset += 40
 
         # NOD command - based on FACE vertical position
         if dnod < -self.NOD_THRESHOLD:
-            cv2.putText(frame, "Nod UP (face moves up)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(frame, "Nod UP - EXTEND", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
             command_shown = True
-            y_offset += 30
+            y_offset += 40
         elif dnod > self.NOD_THRESHOLD:
-            cv2.putText(frame, "Nod DOWN (face moves down)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(frame, "Nod DOWN - RETRACT", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
             command_shown = True
-            y_offset += 30
+            y_offset += 40
 
         # TILT command - based on EYE LINE angle
         if dtilt < -self.TILT_THRESHOLD:
             cv2.putText(frame, "Tilt LEFT (left eye higher)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
             command_shown = True
-            y_offset += 30
+            y_offset += 40
         elif dtilt > self.TILT_THRESHOLD:
             cv2.putText(frame, "Tilt RIGHT (right eye higher)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
             command_shown = True
-            y_offset += 30
+            y_offset += 40
         
         if not command_shown:
             cv2.putText(frame, "(neutral - no command)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            y_offset += 30
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 3)
+            y_offset += 40
 
         # === BLINK & MOUTH STATUS ===
-        y_offset += 10
+        y_offset += 20
         blink_status = ""
         blink_color = (255, 255, 255)
         
         if ear < self.EAR_THRESH:
             if long_blink:
-                blink_status = "✊✊✊ GRASP TRIGGERED! ✊✊✊"
+                blink_status = "GRASP TRIGGERED!"
                 blink_color = (0, 0, 255)  # Red - active grasp!
             else:
                 blink_status = f"Eyes closed - Hold for >1s to grasp! ({blink_duration:.1f}s, EAR={ear:.3f})"
@@ -764,69 +756,69 @@ class FacemeshUR7eControlNode(Node):
             blink_color = (0, 255, 0)  # Green - normal
 
         cv2.putText(frame, blink_status, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, blink_color, 3)  # Larger text for grasp status
-        y_offset += 25
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, blink_color, 3)
+        y_offset += 35
 
         # Mouth detection (toggle state)
         if self.emergency_stop:
-            cv2.putText(frame, f"STOP ACTIVE (toggle: open mouth again to release)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(frame, "STOP ACTIVE (toggle: open mouth again to release)", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
         elif mouth_open:
             cv2.putText(frame, "Mouth open (will toggle stop)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 3)
         else:
             cv2.putText(frame, "Mouth closed", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        y_offset += 30
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 3)
+        y_offset += 40
         
-        # 🎯 IMPRESSIVE FEATURES DISPLAY
-        y_offset += 10
-        cv2.putText(frame, "=== 🎯 ADVANCED FEATURES ===", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-        y_offset += 25
+        # ADVANCED FEATURES DISPLAY
+        y_offset += 20
+        cv2.putText(frame, "ADVANCED FEATURES", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+        y_offset += 35
         
         # Home position status
         if self.home_position is not None:
             if self.returning_to_home:
-                cv2.putText(frame, "🏠 RETURNING TO HOME...", (10, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                cv2.putText(frame, "RETURNING TO HOME...", (10, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 3)
             else:
-                cv2.putText(frame, "🏠 Home saved (Right wink to return)", (10, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                cv2.putText(frame, "Home saved (Right wink to return)", (10, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         else:
-            cv2.putText(frame, "🏠 No home saved (Left wink to save)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
-        y_offset += 25
+            cv2.putText(frame, "No home saved (Left wink to save)", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+        y_offset += 35
         
         # Wink detection status
         if self.left_eye_closed and not self.right_eye_closed:
-            cv2.putText(frame, "👁️ LEFT WINK DETECTED", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2)
-            y_offset += 25
+            cv2.putText(frame, "LEFT WINK DETECTED", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 165, 0), 3)
+            y_offset += 35
         elif self.right_eye_closed and not self.left_eye_closed:
-            cv2.putText(frame, "👁️ RIGHT WINK DETECTED", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 165, 0), 2)
-            y_offset += 25
+            cv2.putText(frame, "RIGHT WINK DETECTED", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 165, 0), 3)
+            y_offset += 35
         
         # Head shake status
         if len(self.head_shake_buffer) > 0:
-            cv2.putText(frame, f"↔️ Shake detected: {len(self.head_shake_buffer)} moves", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-            y_offset += 25
+            cv2.putText(frame, f"Shake detected: {len(self.head_shake_buffer)} moves", (10, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            y_offset += 35
         
-        # 🎯 IMPRESSIVE: Proximity-Based Precision Mode Display
-        y_offset += 10
+        # Proximity-Based Precision Mode Display
+        y_offset += 20
         mode_text = "PRECISION MODE (Fine Control)" if self.precision_mode else "COARSE MODE (Fast Control)"
         mode_color = (0, 255, 255) if self.precision_mode else (255, 165, 0)  # Cyan for precision, Orange for coarse
-        cv2.putText(frame, f"🎯 {mode_text}", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, mode_color, 2)
-        y_offset += 25
-        cv2.putText(frame, f"   Lean IN for precision | Lean BACK for speed", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        cv2.putText(frame, mode_text, (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, mode_color, 3)
+        y_offset += 35
+        cv2.putText(frame, "Lean IN for precision | Lean BACK for speed", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
         
         # Instructions at bottom
         cv2.putText(frame, "Press 'r' to recenter | 'q' to quit | Ctrl+C to stop", 
-                   (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                   (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     
     def draw_mesh(self, frame, result, lm, pts, w, h):
         """Draw face mesh and key landmarks on frame."""
