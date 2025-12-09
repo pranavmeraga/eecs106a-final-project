@@ -210,8 +210,8 @@ class FacemeshUR7eControlNode(Node):
         self.pitch_to_wrist_gain = 1.0  # radians per pixel (nod → wrist_1 counteraction)
         
         # Control gains for MODE 2 (wrist control)
-        self.yaw_to_wrist2_gain = 0.8   # radians per pixel (turn → wrist_2_joint) - faster
-        self.pitch_to_wrist1_gain = 0.8 # radians per pixel (nod → wrist_1_joint) - faster
+        self.yaw_to_wrist2_gain = 1.0   # radians per pixel (turn → wrist_2_joint) - faster
+        self.pitch_to_wrist1_gain = 1.0 # radians per pixel (nod → wrist_1_joint) - faster
         
         # Max joint velocity limits (radians)
         self.max_joint_velocity = 0.5
@@ -664,30 +664,30 @@ class FacemeshUR7eControlNode(Node):
         if control_mode_2:
             # MODE 2: Wrist control commands
             if dturn < -self.TURN_THRESHOLD:
-                command_text = "◀ ROTATE LEFT"
+                command_text = "ROTATE LEFT"
                 command_color = (0, 0, 255)
             elif dturn > self.TURN_THRESHOLD:
-                command_text = "▶ ROTATE RIGHT"
+                command_text = "ROTATE RIGHT"
                 command_color = (0, 0, 255)
             elif dnod < -self.NOD_THRESHOLD:
-                command_text = "▲ EXTEND ARM"
+                command_text = "RETRACT ARM"
                 command_color = (0, 0, 255)
             elif dnod > self.NOD_THRESHOLD:
-                command_text = "▼ RETRACT ARM"
+                command_text = "EXTEND ARM"
                 command_color = (0, 0, 255)
         else:
             # MODE 1: Shoulder control commands
             if dturn < -self.TURN_THRESHOLD:
-                command_text = "◀ TURN LEFT"
+                command_text = "TURN LEFT"
                 command_color = (0, 0, 255)
             elif dturn > self.TURN_THRESHOLD:
-                command_text = "▶ TURN RIGHT"
+                command_text = "TURN RIGHT"
                 command_color = (0, 0, 255)
             elif dnod < -self.NOD_THRESHOLD:
-                command_text = "▲ NOD UP"
+                command_text = "NOD UP"
                 command_color = (0, 0, 255)
             elif dnod > self.NOD_THRESHOLD:
-                command_text = "▼ NOD DOWN"
+                command_text = "NOD DOWN"
                 command_color = (0, 0, 255)
         
         cv2.putText(frame, command_text, (350, y_offset),
