@@ -210,8 +210,8 @@ class FacemeshUR7eControlNode(Node):
         self.pitch_to_wrist_gain = 1.0  # radians per pixel (nod → wrist_1 counteraction)
         
         # Control gains for MODE 2 (wrist control)
-        self.yaw_to_wrist2_gain = 0.35   # radians per pixel (turn → wrist_2_joint) - faster
-        self.pitch_to_wrist1_gain = 0.35 # radians per pixel (nod → wrist_1_joint) - faster
+        self.yaw_to_wrist2_gain = 1.5   # radians per pixel (turn → wrist_2_joint) - faster
+        self.pitch_to_wrist1_gain = 1.5 # radians per pixel (nod → wrist_1_joint) - faster
         
         # Max joint velocity limits (radians)
         self.max_joint_velocity = 0.5
