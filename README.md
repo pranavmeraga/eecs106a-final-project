@@ -90,7 +90,7 @@ python facemesh_preview.py --camera 1
 #### 1. Launch Head Tracking
 ```bash
 source install/setup.bash
-ros2 launch head_teleop head_teleop_launch.py
+ros2 launch head_teleop facemesh_ur7e_control_node.py
 ```
 
 #### 2. Launch UR7e Driver (separate terminal)
