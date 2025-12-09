@@ -210,8 +210,8 @@ class FacemeshUR7eControlNode(Node):
         self.pitch_to_wrist_gain = 1.0  # radians per pixel (nod → wrist_1 counteraction)
         
         # Control gains for MODE 2 (wrist control)
-        self.yaw_to_wrist2_gain = 1.5   # radians per pixel (turn → wrist_2_joint) - faster
-        self.pitch_to_wrist1_gain = 1.5 # radians per pixel (nod → wrist_1_joint) - faster
+        self.yaw_to_wrist2_gain = 0.8   # radians per pixel (turn → wrist_2_joint) - faster
+        self.pitch_to_wrist1_gain = 0.8 # radians per pixel (nod → wrist_1_joint) - faster
         
         # Max joint velocity limits (radians)
         self.max_joint_velocity = 0.5
@@ -498,13 +498,13 @@ class FacemeshUR7eControlNode(Node):
             
             # Nod (pitch) → Extend/Retract arm (move shoulder_lift + elbow simultaneously)
             # Only move if beyond NOD_THRESHOLD (not yellow zone)
-            # Nod up (negative dnod) = extend arm, Nod down (positive dnod) = retract arm
+            # Forward (negative dnod) = extend arm, Backward (positive dnod) = retract arm
             if abs(dnod) > self.NOD_THRESHOLD:
                 # Move shoulder_lift and elbow in opposite directions to extend/retract
-                # Flipped: nod up should extend, nod down should retract
-                arm_movement = dnod * self.pitch_to_lift_gain  # Nod up (negative dnod) = extend
-                new_positions[1] -= arm_movement  # shoulder_lift_joint (flipped assignment)
-                new_positions[2] += arm_movement  # elbow_joint (flipped assignment)
+                # When shoulder_lift goes up, elbow goes down (and vice versa) to extend the arm
+                arm_movement = -dnod * self.pitch_to_lift_gain  # Negative because nod up = extend
+                new_positions[1] += arm_movement  # shoulder_lift_joint moves in one direction
+                new_positions[2] -= arm_movement  # elbow_joint moves in opposite direction to extend
                 
                 # Wrist counteraction: move wrist_1_joint opposite to maintain gripper at 90deg
                 # Since we're moving both shoulder and elbow, we need double the wrist compensation
@@ -570,31 +570,31 @@ class FacemeshUR7eControlNode(Node):
         h, w = frame.shape[:2]
         
         # Top-left column: Control Mode and Status
-        y_offset = 30
+        y_offset = 25
         mode_text = "MODE 2: WRIST" if control_mode_2 else "MODE 1: SHOULDER"
         mode_color = (100, 200, 255) if control_mode_2 else (100, 255, 150)
         cv2.putText(frame, mode_text, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.0, mode_color, 3)
-        y_offset += 45
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, mode_color, 2)
+        y_offset += 35
         
         status_color = (0, 255, 0) if not self.emergency_stop else (0, 0, 255)
         status_text = "RUNNING" if not self.emergency_stop else "STOPPED"
         cv2.putText(frame, status_text, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, status_color, 3)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.65, status_color, 2)
         
         # Deadzone indicator
-        y_offset += 40
+        y_offset += 30
         in_deadzone = abs(dnod) < self.NOD_DEADZONE and abs(dturn) < self.TURN_DEADZONE
         deadzone_color = (0, 255, 0) if in_deadzone else (0, 200, 255)
-        deadzone_text = "DEADZONE ACTIVE" if in_deadzone else "DEADZONE"
+        deadzone_text = "DEADZONE ✓" if in_deadzone else "DEADZONE"
         cv2.putText(frame, deadzone_text, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, deadzone_color, 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, deadzone_color, 1)
         
         # Top-left column continued: Deltas with color coding
-        y_offset += 35
+        y_offset += 25
         cv2.putText(frame, "MOTION:", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        y_offset += 30
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+        y_offset += 22
         
         # Nod status
         if dnod == 0.0:
@@ -602,15 +602,14 @@ class FacemeshUR7eControlNode(Node):
             nod_text = "Nod:  NEUTRAL"
         elif abs(dnod) < self.NOD_THRESHOLD:
             nod_color = (0, 255, 255)  # Yellow - in yellow zone, no movement
-            nod_text = f"Nod:  {dnod:+6.1f}px (YELLOW ZONE)"
+            nod_text = f"Nod:  {dnod:+6.1f}px 🟡"
         else:
             nod_color = (0, 0, 255)  # Red - active
-            direction = "UP" if dnod < 0 else "DOWN"
-            nod_text = f"Nod:  {dnod:+6.1f}px {direction}"
+            nod_text = f"Nod:  {dnod:+6.1f}px {'▲' if dnod < 0 else '▼'}"
         
         cv2.putText(frame, nod_text, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, nod_color, 2)
-        y_offset += 30
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, nod_color, 1)
+        y_offset += 22
         
         # Turn status
         if dturn == 0.0:
@@ -618,49 +617,46 @@ class FacemeshUR7eControlNode(Node):
             turn_text = "Turn: NEUTRAL"
         elif abs(dturn) < self.TURN_THRESHOLD:
             turn_color = (0, 255, 255)  # Yellow - in yellow zone, no movement
-            turn_text = f"Turn: {dturn:+6.1f}px (YELLOW ZONE)"
+            turn_text = f"Turn: {dturn:+6.1f}px 🟡"
         else:
             turn_color = (0, 0, 255)  # Red - active
-            direction = "LEFT" if dturn < 0 else "RIGHT"
-            turn_text = f"Turn: {dturn:+6.1f}px {direction}"
+            turn_text = f"Turn: {dturn:+6.1f}px {'◀' if dturn < 0 else '▶'}"
         
         cv2.putText(frame, turn_text, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, turn_color, 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, turn_color, 1)
         
         # Eye status with blink timers (top-left, below motion)
-        y_offset += 40
+        y_offset += 28
         cv2.putText(frame, "EYE BLINKS:", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        y_offset += 30
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+        y_offset += 22
         
         # Left eye indicator
         left_eye_color = (255, 0, 0) if left_ear < self.EAR_THRESH else (0, 255, 0)
-        left_eye_state = "CLOSED" if left_ear < self.EAR_THRESH else "OPEN"
-        left_eye_text = f"L-Eye: {left_eye_state} {left_blink_hold_time:.2f}s"
+        left_eye_text = f"L-Eye: {'●' if left_ear < self.EAR_THRESH else '○'} {left_blink_hold_time:.2f}s"
         cv2.putText(frame, left_eye_text, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.65, left_eye_color, 2)
-        y_offset += 28
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, left_eye_color, 1)
+        y_offset += 20
         
         # Right eye indicator
         right_eye_color = (255, 0, 0) if right_ear < self.EAR_THRESH else (0, 255, 0)
-        right_eye_state = "CLOSED" if right_ear < self.EAR_THRESH else "OPEN"
-        right_eye_text = f"R-Eye: {right_eye_state} {right_blink_hold_time:.2f}s"
+        right_eye_text = f"R-Eye: {'●' if right_ear < self.EAR_THRESH else '○'} {right_blink_hold_time:.2f}s"
         cv2.putText(frame, right_eye_text, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.65, right_eye_color, 2)
-        y_offset += 28
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, right_eye_color, 1)
+        y_offset += 20
         
         # Both eyes indicator for mode toggle
         both_eyes_color = (255, 0, 0) if left_ear < self.EAR_THRESH and right_ear < self.EAR_THRESH else (0, 255, 0)
-        both_blink_bar = "=" * min(20, int(both_blink_hold_time * 10))
-        both_eyes_text = f"Mode Toggle: {both_blink_bar} {both_blink_hold_time:.2f}s"
+        both_blink_bar = "█" * min(10, int(both_blink_hold_time * 10))
+        both_eyes_text = f"Mode: {both_blink_bar} {both_blink_hold_time:.2f}s"
         cv2.putText(frame, both_eyes_text, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.65, both_eyes_color, 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, both_eyes_color, 1)
         
         # Top-center column: Active Command
-        y_offset = 30
+        y_offset = 25
         cv2.putText(frame, "COMMAND:", (350, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 3)
-        y_offset += 40
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+        y_offset += 30
         
         command_text = "(neutral)"
         command_color = (0, 255, 0)
@@ -668,61 +664,61 @@ class FacemeshUR7eControlNode(Node):
         if control_mode_2:
             # MODE 2: Wrist control commands
             if dturn < -self.TURN_THRESHOLD:
-                command_text = "ROTATE LEFT"
+                command_text = "◀ ROTATE LEFT"
                 command_color = (0, 0, 255)
             elif dturn > self.TURN_THRESHOLD:
-                command_text = "ROTATE RIGHT"
+                command_text = "▶ ROTATE RIGHT"
                 command_color = (0, 0, 255)
             elif dnod < -self.NOD_THRESHOLD:
-                command_text = "EXTEND ARM"
+                command_text = "▲ EXTEND ARM"
                 command_color = (0, 0, 255)
             elif dnod > self.NOD_THRESHOLD:
-                command_text = "RETRACT ARM"
+                command_text = "▼ RETRACT ARM"
                 command_color = (0, 0, 255)
         else:
             # MODE 1: Shoulder control commands
             if dturn < -self.TURN_THRESHOLD:
-                command_text = "TURN LEFT"
+                command_text = "◀ TURN LEFT"
                 command_color = (0, 0, 255)
             elif dturn > self.TURN_THRESHOLD:
-                command_text = "TURN RIGHT"
+                command_text = "▶ TURN RIGHT"
                 command_color = (0, 0, 255)
             elif dnod < -self.NOD_THRESHOLD:
-                command_text = "NOD UP"
+                command_text = "▲ NOD UP"
                 command_color = (0, 0, 255)
             elif dnod > self.NOD_THRESHOLD:
-                command_text = "NOD DOWN"
+                command_text = "▼ NOD DOWN"
                 command_color = (0, 0, 255)
         
         cv2.putText(frame, command_text, (350, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.0, command_color, 3)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.65, command_color, 2)
         
         # Top-right column: Mouth and Grasp status
-        y_offset = 30
+        y_offset = 25
         mouth_color = (0, 165, 255) if mouth_open else (0, 255, 0)
-        mouth_state = "OPEN" if mouth_open else "CLOSED"
-        mouth_text = f"MOUTH: {mouth_state}"
+        mouth_icon = "🔴" if mouth_open else "⭕"
+        mouth_text = f"MOUTH {mouth_icon}"
         cv2.putText(frame, mouth_text, (650, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, mouth_color, 3)
-        y_offset += 40
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, mouth_color, 2)
+        y_offset += 35
         
         # Thresholds reference
         cv2.putText(frame, "Thresholds:", (650, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
-        y_offset += 30
-        cv2.putText(frame, f"Turn: +/-{self.TURN_THRESHOLD:.0f}px", (650, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-        y_offset += 28
-        cv2.putText(frame, f"Nod: +/-{self.NOD_THRESHOLD:.0f}px", (650, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-        y_offset += 28
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+        y_offset += 22
+        cv2.putText(frame, f"Turn: ±{self.TURN_THRESHOLD:.0f}px", (650, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+        y_offset += 18
+        cv2.putText(frame, f"Nod: ±{self.NOD_THRESHOLD:.0f}px", (650, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+        y_offset += 18
         cv2.putText(frame, f"Deadzone: {self.TURN_DEADZONE:.0f}px", (650, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
         
         # Bottom instruction bar
         instructions = "BOTH EYES BLINK=MODE  |  L-BLINK=STOP  |  R-BLINK=CENTER  |  MOUTH=GRASP"
         cv2.putText(frame, instructions,
-                   (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                   (10, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1)
     
     def draw_mesh(self, frame, result, lm, pts, w, h):
         """Draw face mesh and key landmarks on frame."""
@@ -797,7 +793,7 @@ class FacemeshUR7eControlNode(Node):
             rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
             response = future.result()
             if response.success:
-                self.get_logger().info("✊ Gripper toggled (will fully open/close)!")
+                self.get_logger().info("Gripper toggled (will fully open/close)!")
             else:
                 self.get_logger().warn(f"Gripper toggle failed: {response.message}")
         except Exception as e:
@@ -809,7 +805,7 @@ class FacemeshUR7eControlNode(Node):
         self.neutral_set = False
         self.face_y_filter.reset()
         self.mouth_x_filter.reset()
-        self.get_logger().info("🎯 Neutral pose reset - will recenter on next frame")
+        self.get_logger().info("Neutral pose reset - will recenter on next frame")
     
     def play_beep(self, frequency=1000, duration=0.2, sample_rate=44100):
         """Play a beep sound at specified frequency."""
@@ -866,3 +862,4 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
+
