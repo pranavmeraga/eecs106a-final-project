@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-facemesh_ur7e_control_node.py
+"""facemesh_ur7e_control_node.py
 
 Controls UR7e robot joints using facemesh head pose detection.
 Combines facemesh detection with joint trajectory publishing.
@@ -12,11 +11,21 @@ Publishes:
 - /scaled_joint_trajectory_controller/joint_trajectory (JointTrajectory): Joint commands
 
 Control Mapping:
+MODE 1 (Shoulder Control):
 - Turn head left/right (yaw) → shoulder_pan_joint
 - Nod up/down (pitch) → shoulder_lift_joint
-- Tilt head left/right (roll) → elbow_joint
-- Long blink → wrist_1_joint adjustment
-- Open mouth → Emergency stop (zero velocities)
+- Open mouth (hold >1s) → Grasp toggle (alternate grasp/open)
+
+MODE 2 (Wrist Control):
+- Turn head left/right (yaw) → wrist_2_joint (rotate gripper left/right)
+- Nod up/down (pitch) → shoulder_lift_joint + elbow_joint (extend/retract arm)
+- Automatic wrist_1_joint compensation to keep gripper at 90° to plane
+- Open mouth (hold >1s) → Grasp toggle (alternate grasp/open)
+
+Control Actions:
+- Both eyes blink (hold >1s) → Toggle between MODE 1 and MODE 2
+- Left eye blink (hold >1s) → Emergency stop (toggle)
+- Right eye blink (hold >1s) → Recenter neutral pose
 """
 
 import cv2
@@ -24,11 +33,15 @@ import time
 import numpy as np
 import mediapipe as mp
 import argparse
+import wave
+import os
+import math
 
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from std_srvs.srv import Trigger
 
 
 # Facemesh landmarks
@@ -89,24 +102,6 @@ def calculate_mouth_horizontal_position(lm, w):
     return mouth_center_x
 
 
-def calculate_head_tilt_angle(lm, w, h):
-    """Calculate TILT based on eye horizontal alignment."""
-    # Get eye positions
-    left_eye_x = lm[33].x * w
-    left_eye_y = lm[33].y * h
-    right_eye_x = lm[263].x * w
-    right_eye_y = lm[263].y * h
-    
-    # Calculate angle of line connecting eyes
-    dx = right_eye_x - left_eye_x
-    dy = right_eye_y - left_eye_y
-    
-    # Angle in radians (0 = horizontal, + = right eye higher, - = left eye higher)
-    tilt_angle = np.arctan2(dy, dx)
-    
-    return tilt_angle
-
-
 def rotation_matrix_to_euler_angles(R: np.ndarray) -> tuple:
     """Convert rotation matrix to Euler angles."""
     sy = np.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
@@ -152,6 +147,9 @@ class FacemeshUR7eControlNode(Node):
             10
         )
         
+        # Gripper service client
+        self.gripper_cli = self.create_client(Trigger, '/toggle_gripper')
+        
         # MediaPipe Face Mesh
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(
@@ -173,46 +171,56 @@ class FacemeshUR7eControlNode(Node):
         self.neutral_set = False
         self.face_center_y0 = 0.0
         self.mouth_center_x0 = 0.0
-        self.tilt_angle0 = 0.0
         
         # Smoothing filters
         self.face_y_filter = SmoothingFilter(alpha=0.3)
         self.mouth_x_filter = SmoothingFilter(alpha=0.3)
-        self.tilt_filter = SmoothingFilter(alpha=0.3)
         
-        # Blink tracking - trigger grasp once when held >1s
-        self.eye_closed = False
-        self.eye_close_start = 0.0
+        # Blink tracking - left eye, right eye, and both eyes for mode toggle
+        self.left_eye_closed = False
+        self.left_eye_close_start = 0.0
+        self.right_eye_closed = False
+        self.right_eye_close_start = 0.0
+        self.both_eyes_closed = False
+        self.both_eyes_close_start = 0.0
         self.EAR_THRESH = 0.21  # Eye aspect ratio threshold
-        self.GRASP_BLINK_TIME = 1.0  # Hold blink for 1 second to trigger grasp
-        self.blink_frames_count = 0  # Track consecutive blink frames
-        self.blink_triggered = False  # Track if we've already triggered this blink (one-time trigger)
+        self.BLINK_HOLD_TIME = 1.0  # Hold blink for 1 second to trigger action
+        self.MODE_TOGGLE_HOLD_TIME = 1.0  # Hold both eyes closed for 1s to toggle mode
+        self.left_blink_triggered = False  # Track if we've already triggered left blink
+        self.right_blink_triggered = False  # Track if we've already triggered right blink
+        self.mode_toggle_triggered = False  # Track if we've already triggered mode toggle
         
-        # Mouth tracking
+        # Mouth tracking for grasp
         self.MOUTH_OPEN_THRESH = 0.03
+        self.mouth_was_open = False  # Track previous mouth state for toggle
+        self.grasp_toggled = False  # Track if we've already triggered grasp toggle
+        self.grasp_open_start = 0.0  # Track when mouth opens
         
         # Thresholds - same as facemesh_preview.py
-        self.TURN_THRESHOLD = 25.0     # pixels
-        self.NOD_THRESHOLD = 25.0      # pixels
-        self.TILT_THRESHOLD = 0.12     # radians ~6.9°
+        self.TURN_THRESHOLD = 18.0     # pixels
+        self.NOD_THRESHOLD = 18.0      # pixels
         
-        # Deadzones
-        self.TURN_DEADZONE = 10.0      # pixels
-        self.NOD_DEADZONE = 10.0       # pixels
-        self.TILT_DEADZONE = 0.05      # radians ~2.9°
+        # Deadzones - reduced for more responsive control
+        self.TURN_DEADZONE = 2.0       # pixels - very responsive for turning
+        self.NOD_DEADZONE = 2.0        # pixels - very responsive for nodding
         
-        # Control gains - how much joint angle changes per pixel/radian
-        self.yaw_to_pan_gain = 0.15    # radians per pixel (turn → shoulder_pan) - INCREASED for faster response
-        self.pitch_to_lift_gain = 0.15  # radians per pixel (nod → shoulder_lift) - INCREASED for faster response
-        self.roll_to_elbow_gain = 1.5   # radians per radian (tilt → elbow) - INCREASED for faster response
-        self.pitch_to_wrist_gain = 1.0  # radians per pixel (nod → wrist_1 counteraction) - NEW for wrist control
+        # Control gains for MODE 1 (shoulder control)
+        self.yaw_to_pan_gain = 0.15    # radians per pixel (turn → shoulder_pan)
+        self.pitch_to_lift_gain = 0.15  # radians per pixel (nod → shoulder_lift)
+        self.pitch_to_wrist_gain = 1.0  # radians per pixel (nod → wrist_1 counteraction)
+        
+        # Control gains for MODE 2 (wrist control)
+        self.yaw_to_wrist2_gain = 0.35   # radians per pixel (turn → wrist_2_joint) - faster
+        self.pitch_to_wrist1_gain = 0.35 # radians per pixel (nod → wrist_1_joint) - faster
         
         # Max joint velocity limits (radians)
         self.max_joint_velocity = 0.5
         
         # Emergency stop flag (toggle state)
         self.emergency_stop = False
-        self.mouth_was_open = False  # Track previous mouth state for toggle
+        
+        # Control mode flag: False = MODE 1 (shoulder), True = MODE 2 (wrist)
+        self.control_mode_2 = False
         
         # Quit flag
         self.should_quit = False
@@ -226,17 +234,17 @@ class FacemeshUR7eControlNode(Node):
         self.get_logger().info("Facemesh UR7e Control Node Started")
         self.get_logger().info(f"Camera index: {camera_index}, Mirror: {mirror}")
         self.get_logger().info("Control Mapping:")
-        self.get_logger().info("  Turn head LEFT/RIGHT → shoulder_pan_joint")
-        self.get_logger().info("  Nod UP/DOWN → shoulder_lift_joint")
-        self.get_logger().info("  Tilt LEFT/RIGHT → elbow_joint")
-        self.get_logger().info("  Long blink → wrist_1_joint adjustment")
-        self.get_logger().info("  Open mouth → Emergency stop")
-        self.get_logger().info("Press 'r' in OpenCV window to recenter neutral pose")
-        self.get_logger().info("🎬 OpenCV GUI window will appear shortly...")
-        self.get_logger().info("⚡ Performance Settings:")
-        self.get_logger().info("   • Update rate: 60 Hz (was 30 Hz)")
-        self.get_logger().info("   • Trajectory time: 100ms (was 5 seconds)")
-        self.get_logger().info("   • Control gains: 5x faster response")
+        self.get_logger().info("  MODE 1 (Shoulder Control):")
+        self.get_logger().info("    Turn head LEFT/RIGHT → shoulder_pan_joint")
+        self.get_logger().info("    Nod UP/DOWN → shoulder_lift_joint")
+        self.get_logger().info("  MODE 2 (Wrist Control):")
+        self.get_logger().info("    Turn head LEFT/RIGHT → wrist_2_joint (rotate gripper)")
+        self.get_logger().info("    Nod UP/DOWN → shoulder_lift + elbow (extend/retract arm)")
+        self.get_logger().info("    Auto wrist_1 compensation → maintain 90° gripper angle")
+        self.get_logger().info("  Both eyes blink (hold >1s) → Toggle between MODE 1 and MODE 2")
+        self.get_logger().info("  Open mouth (hold >1s) → Grasp toggle")
+        self.get_logger().info("  Left eye blink (hold >1s) → Emergency stop")
+        self.get_logger().info("  Right eye blink (hold >1s) → Recenter position")
     
     def joint_state_callback(self, msg: JointState):
         """Update current joint positions from joint_states topic."""
@@ -278,7 +286,8 @@ class FacemeshUR7eControlNode(Node):
             # Show display even without face
             try:
                 if not self.window_created:
-                    cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_AUTOSIZE)
+                    cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_NORMAL)
+                    cv2.resizeWindow("Facemesh UR7e Control", 1280, 960)
                     self.window_created = True
                     self.get_logger().info("✅ OpenCV GUI window created and displaying camera feed!")
                 
@@ -299,97 +308,144 @@ class FacemeshUR7eControlNode(Node):
         # Calculate face metrics
         face_center_y = calculate_face_center_y(lm, h)
         mouth_center_x = calculate_mouth_horizontal_position(lm, w)
-        tilt_angle = calculate_head_tilt_angle(lm, w, h)
         
         # Set neutral pose on first frame
         if not self.neutral_set:
             self.face_center_y0 = face_center_y
             self.mouth_center_x0 = mouth_center_x
-            self.tilt_angle0 = tilt_angle
             self.neutral_set = True
             self.get_logger().info(
                 f"Neutral pose set: Face Y={self.face_center_y0:.1f}px, "
-                f"Mouth X={self.mouth_center_x0:.1f}px, "
-                f"Tilt={np.degrees(self.tilt_angle0):.1f}°"
+                f"Mouth X={self.mouth_center_x0:.1f}px"
             )
         
         # Calculate deltas
         dnod = face_center_y - self.face_center_y0
         dturn = mouth_center_x - self.mouth_center_x0
-        dtilt = tilt_angle - self.tilt_angle0
         
         # Apply smoothing
         dnod = self.face_y_filter.update(dnod)
         dturn = self.mouth_x_filter.update(dturn)
-        dtilt = self.tilt_filter.update(dtilt)
         
         # Apply deadzones
         if abs(dnod) < self.NOD_DEADZONE:
             dnod = 0.0
         if abs(dturn) < self.TURN_DEADZONE:
             dturn = 0.0
-        if abs(dtilt) < self.TILT_DEADZONE:
-            dtilt = 0.0
         
-        # Detect blink - SENSITIVE for grasp
+        # Detect left and right eye blinks separately
         left_eye = pts[LEFT_EYE_IDX]
         right_eye = pts[RIGHT_EYE_IDX]
-        ear = 0.5 * (eye_aspect_ratio(left_eye) + eye_aspect_ratio(right_eye))
+        left_ear = eye_aspect_ratio(left_eye)
+        right_ear = eye_aspect_ratio(right_eye)
         
         now = time.time()
-        long_blink = False
-        blink_duration = 0.0  # Track blink duration for display
+        left_blink_triggered = False
+        right_blink_triggered = False
+        mode_toggle_triggered = False
+        left_blink_hold_time = 0.0
+        right_blink_hold_time = 0.0
+        both_blink_hold_time = 0.0
         
-        if ear < self.EAR_THRESH:
-            if not self.eye_closed:
-                self.eye_closed = True
-                self.eye_close_start = now
-                self.blink_frames_count = 0
-                self.blink_triggered = False  # Reset trigger flag when eyes close
-                blink_duration = 0.0
+        # Check if both eyes are closed
+        both_eyes_closed_now = left_ear < self.EAR_THRESH and right_ear < self.EAR_THRESH
+        
+        # Both eyes blink detection - Mode toggle (hold >1s)
+        if both_eyes_closed_now:
+            if not self.both_eyes_closed:
+                self.both_eyes_closed = True
+                self.both_eyes_close_start = now
+                self.mode_toggle_triggered = False
             else:
-                self.blink_frames_count += 1
-                blink_duration = now - self.eye_close_start
-                # Trigger grasp once if held closed long enough (>1s)
-                # Only trigger once per blink event (when eyes are still closed)
-                if blink_duration >= self.GRASP_BLINK_TIME and not self.blink_triggered:
-                    long_blink = True
-                    self.blink_triggered = True  # Mark as triggered to prevent multiple triggers
-                    self.get_logger().info(f"🤏 GRASP TRIGGERED! (EAR={ear:.3f}, held for {blink_duration:.2f}s)")
+                # Both eyes still closed, check if we should trigger mode toggle
+                both_blink_hold_time = now - self.both_eyes_close_start
+                if both_blink_hold_time >= self.MODE_TOGGLE_HOLD_TIME and not self.mode_toggle_triggered:
+                    mode_toggle_triggered = True
+                    self.mode_toggle_triggered = True
+                    self.control_mode_2 = not self.control_mode_2
+                    mode_name = "MODE 2 (Wrist Control)" if self.control_mode_2 else "MODE 1 (Shoulder Control)"
+                    self.get_logger().info(f"🔄 CONTROL MODE CHANGED to {mode_name} - Both eyes held closed for {both_blink_hold_time:.2f}s!")
+                    self.play_beep(frequency=1000, duration=0.3)  # Play beep on mode change
         else:
-            if self.eye_closed:
-                self.eye_closed = False
-                self.blink_frames_count = 0
-                self.blink_triggered = False  # Reset when eyes open
-            blink_duration = 0.0
+            if self.both_eyes_closed:
+                self.both_eyes_closed = False
+                self.mode_toggle_triggered = False
         
-        # Detect mouth open (emergency stop TOGGLE)
+        # Left eye blink detection - Emergency stop
+        if left_ear < self.EAR_THRESH:
+            if not self.left_eye_closed:
+                self.left_eye_closed = True
+                self.left_eye_close_start = now
+                self.left_blink_triggered = False
+            else:
+                # Eye is still closed, check if we should trigger emergency stop
+                left_blink_hold_time = now - self.left_eye_close_start
+                if left_blink_hold_time >= self.BLINK_HOLD_TIME and not self.left_blink_triggered:
+                    left_blink_triggered = True
+                    self.left_blink_triggered = True
+                    self.emergency_stop = not self.emergency_stop
+                    if self.emergency_stop:
+                        self.get_logger().warn(f"🛑 EMERGENCY STOP - Left eye blink held for {left_blink_hold_time:.2f}s")
+                    else:
+                        self.get_logger().info(f"✅ Emergency stop released - Left eye blink held for {left_blink_hold_time:.2f}s")
+        else:
+            if self.left_eye_closed:
+                self.left_eye_closed = False
+                self.left_blink_triggered = False
+        
+        # Right eye blink detection - Recenter
+        if right_ear < self.EAR_THRESH:
+            if not self.right_eye_closed:
+                self.right_eye_closed = True
+                self.right_eye_close_start = now
+                self.right_blink_triggered = False
+            else:
+                # Eye is still closed, check if we should trigger recenter
+                right_blink_hold_time = now - self.right_eye_close_start
+                if right_blink_hold_time >= self.BLINK_HOLD_TIME and not self.right_blink_triggered:
+                    right_blink_triggered = True
+                    self.right_blink_triggered = True
+                    self.recenter_neutral()
+                    self.get_logger().info(f"🎯 Recentering - Right eye blink held for {right_blink_hold_time:.2f}s")
+        else:
+            if self.right_eye_closed:
+                self.right_eye_closed = False
+                self.right_blink_triggered = False
+        
+        # Detect mouth open for grasp toggle
         mouth_top = pts[MOUTH_TOP_IDX]
         mouth_bottom = pts[MOUTH_BOTTOM_IDX]
         mouth_dist = np.linalg.norm(mouth_top - mouth_bottom)
         relative_dist = mouth_dist / h
         mouth_open = relative_dist > self.MOUTH_OPEN_THRESH
         
-        # Toggle emergency stop on mouth open transition (open once toggles on, open again toggles off)
+        now_time = time.time()
+        grasp_triggered = False
         if mouth_open and not self.mouth_was_open:
-            # Mouth just opened - toggle emergency stop
-            self.emergency_stop = not self.emergency_stop
-            if self.emergency_stop:
-                self.get_logger().warn("🛑 EMERGENCY STOP ACTIVATED - Mouth Open")
-            else:
-                self.get_logger().info("✅ Emergency stop DEACTIVATED - Mouth Open")
-        
-        self.mouth_was_open = mouth_open
+            self.mouth_was_open = True
+            self.grasp_open_start = now_time
+            self.grasp_toggled = False
+        elif mouth_open and self.mouth_was_open:
+            mouth_open_duration = now_time - self.grasp_open_start
+            if mouth_open_duration >= self.BLINK_HOLD_TIME and not self.grasp_toggled:
+                grasp_triggered = True
+                self.grasp_toggled = True
+                self.get_logger().info(f"✊ GRASP TOGGLE - Mouth held open for {mouth_open_duration:.2f}s")
+        elif not mouth_open and self.mouth_was_open:
+            self.mouth_was_open = False
+            self.grasp_toggled = False
         
         if self.emergency_stop:
             self.publish_zero_trajectory()
             # Still show the display
-            self.draw_overlay(frame, dnod, dturn, dtilt, ear, mouth_open, long_blink, 0.0)
+            self.draw_overlay(frame, dnod, dturn, left_ear, right_ear, mouth_open, self.control_mode_2,
+                             left_blink_hold_time, right_blink_hold_time, both_blink_hold_time)
             self.draw_mesh(frame, result, lm, pts, w, h)
             
             try:
                 if not self.window_created:
-                    cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_AUTOSIZE)
+                    cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_NORMAL)
+                    cv2.resizeWindow("Facemesh UR7e Control", 1280, 960)
                     self.window_created = True
                     self.get_logger().info("✅ OpenCV GUI window created and displaying camera feed!")
                 
@@ -400,7 +456,7 @@ class FacemeshUR7eControlNode(Node):
                 self.get_logger().warn(f"Display error: {e}", throttle_duration_sec=5.0)
             return
         
-        # Check if we should start publishing (either got joint states or timeout)
+        # Detect mouth open (emergency stop TOGGLE)
         if not self.got_joint_states:
             if time.time() > self.joint_states_timeout:
                 self.got_joint_states = True
@@ -411,12 +467,14 @@ class FacemeshUR7eControlNode(Node):
             else:
                 self.get_logger().warn("Waiting for joint states...", throttle_duration_sec=2.0)
                 # Still show display while waiting
-                self.draw_overlay(frame, dnod, dturn, dtilt, ear, mouth_open, long_blink, 0.0)
+                self.draw_overlay(frame, dnod, dturn, left_ear, right_ear, mouth_open, self.control_mode_2,
+                                 left_blink_hold_time, right_blink_hold_time, both_blink_hold_time)
                 self.draw_mesh(frame, result, lm, pts, w, h)
                 
                 try:
                     if not self.window_created:
-                        cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_AUTOSIZE)
+                        cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_NORMAL)
+                        cv2.resizeWindow("Facemesh UR7e Control", 1280, 960)
                         self.window_created = True
                         self.get_logger().info("✅ OpenCV GUI window created and displaying camera feed!")
                     
@@ -427,51 +485,66 @@ class FacemeshUR7eControlNode(Node):
                     self.get_logger().warn(f"Display error: {e}", throttle_duration_sec=5.0)
                 return
         
-        # Calculate new joint positions based on head movements
+        # Calculate new joint positions based on head movements and control mode
         new_positions = self.joint_positions.copy()
         
-        # Map head movements to joints
-        # Turn (yaw) → shoulder_pan_joint
-        if abs(dturn) > self.TURN_DEADZONE:
-            delta_pan = dturn * self.yaw_to_pan_gain
-            new_positions[0] += delta_pan
-        
-        # Nod (pitch) → shoulder_lift_joint
-        if abs(dnod) > self.NOD_DEADZONE:
-            delta_lift = -dnod * self.pitch_to_lift_gain  # Negative because nod up should lift
-            new_positions[1] += delta_lift
+        if self.control_mode_2:
+            # MODE 2: Wrist control
+            # Turn (yaw) → wrist_2_joint (rotate gripper left/right)
+            # Only move if beyond TURN_THRESHOLD (not yellow zone)
+            if abs(dturn) > self.TURN_THRESHOLD:
+                delta_wrist2 = dturn * self.yaw_to_wrist2_gain
+                new_positions[4] += delta_wrist2  # wrist_2_joint for rotation
             
-            # Wrist counteraction: move wrist_1_joint opposite to shoulder_lift to keep gripper at 90deg
-            # When nodding down (dnod > 0), shoulder_lift goes down (negative delta_lift)
-            # To keep gripper perpendicular, wrist should rotate opposite to shoulder movement
-            # So when shoulder goes down, wrist goes up (positive) to counteract
-            delta_wrist = -delta_lift * self.pitch_to_wrist_gain  # Opposite to shoulder_lift movement
-            new_positions[3] += delta_wrist  # wrist_1_joint counteracts pitch
+            # Nod (pitch) → Extend/Retract arm (move shoulder_lift + elbow simultaneously)
+            # Only move if beyond NOD_THRESHOLD (not yellow zone)
+            # Forward (negative dnod) = extend arm, Backward (positive dnod) = retract arm
+            if abs(dnod) > self.NOD_THRESHOLD:
+                # Move shoulder_lift and elbow in opposite directions to extend/retract
+                # When shoulder_lift goes up, elbow goes down (and vice versa) to extend the arm
+                arm_movement = -dnod * self.pitch_to_lift_gain  # Negative because nod up = extend
+                new_positions[1] += arm_movement  # shoulder_lift_joint moves in one direction
+                new_positions[2] -= arm_movement  # elbow_joint moves in opposite direction to extend
+                
+                # Wrist counteraction: move wrist_1_joint opposite to maintain gripper at 90deg
+                # Since we're moving both shoulder and elbow, we need double the wrist compensation
+                delta_wrist1 = -arm_movement * self.pitch_to_wrist_gain * 2.0  # Double compensation for both joints
+                new_positions[3] += delta_wrist1  # wrist_1_joint counteracts shoulder/elbow movement
+        else:
+            # MODE 1: Shoulder control (default)
+            # Turn (yaw) → shoulder_pan_joint
+            # Only move if beyond TURN_THRESHOLD (not yellow zone)
+            if abs(dturn) > self.TURN_THRESHOLD:
+                delta_pan = dturn * self.yaw_to_pan_gain
+                new_positions[0] += delta_pan
+            
+            # Nod (pitch) → shoulder_lift_joint
+            # Only move if beyond NOD_THRESHOLD (not yellow zone)
+            if abs(dnod) > self.NOD_THRESHOLD:
+                delta_lift = -dnod * self.pitch_to_lift_gain  # Negative because nod up should lift
+                new_positions[1] += delta_lift
+                
+                # Wrist counteraction: move wrist_1_joint opposite to shoulder_lift to keep gripper at 90deg
+                delta_wrist = -delta_lift * self.pitch_to_wrist_gain  # Opposite to shoulder_lift movement
+                new_positions[3] += delta_wrist  # wrist_1_joint counteracts pitch
         
-        # Tilt (roll) → elbow_joint
-        if abs(dtilt) > self.TILT_DEADZONE:
-            delta_elbow = dtilt * self.roll_to_elbow_gain
-            new_positions[2] += delta_elbow
-        
-        # Long blink → GRASP! Execute one-time grasp command
-        if long_blink:
-            # Strong grasp: move wrist joints significantly to close gripper (one-time command)
-            new_positions[3] += 1.5  # LARGE adjustment for aggressive grasp
-            new_positions[4] += 0.3  # Also adjust wrist_2_joint for better grasp
-            new_positions[5] -= 0.3  # Adjust wrist_3_joint
-            self.get_logger().info("✊✊✊ GRASP COMMAND EXECUTED! Closing gripper...")
+        # Mouth open → GRASP toggle (use service call instead of joint trajectory)
+        if grasp_triggered:
+            self.toggle_gripper_service()
         
         # Publish trajectory
         self.publish_trajectory(new_positions)
         
         # Update display with overlay and show window
-        self.draw_overlay(frame, dnod, dturn, dtilt, ear, mouth_open, long_blink, blink_duration)
+        self.draw_overlay(frame, dnod, dturn, left_ear, right_ear, mouth_open, self.control_mode_2,
+                         left_blink_hold_time, right_blink_hold_time, both_blink_hold_time)
         self.draw_mesh(frame, result, lm, pts, w, h)
         
         try:
             # Create window if it doesn't exist and show the frame
             if not self.window_created:
-                cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_AUTOSIZE)
+                cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_NORMAL)
+                cv2.resizeWindow("Facemesh UR7e Control", 1280, 960)
                 self.window_created = True
                 self.get_logger().info("✅ OpenCV GUI window created and displaying camera feed!")
             
@@ -491,124 +564,161 @@ class FacemeshUR7eControlNode(Node):
         except Exception as e:
             self.get_logger().warn(f"Display error: {e}", throttle_duration_sec=5.0)
     
-    def draw_overlay(self, frame, dnod, dturn, dtilt, ear, mouth_open, long_blink, blink_duration):
-        """Draw comprehensive overlay information on frame (from facemesh_preview)."""
+    def draw_overlay(self, frame, dnod, dturn, left_ear, right_ear, mouth_open, control_mode_2, 
+                     left_blink_hold_time=0.0, right_blink_hold_time=0.0, both_blink_hold_time=0.0):
+        """Draw overlay information on frame with detailed status."""
         h, w = frame.shape[:2]
-        y_offset = 30
         
-        # === RAW POSITIONS ===
-        cv2.putText(frame, "=== RAW POSITIONS ===", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        # Top-left column: Control Mode and Status
+        y_offset = 25
+        mode_text = "MODE 2: WRIST" if control_mode_2 else "MODE 1: SHOULDER"
+        mode_color = (100, 200, 255) if control_mode_2 else (100, 255, 150)
+        cv2.putText(frame, mode_text, (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, mode_color, 2)
+        y_offset += 35
+        
+        status_color = (0, 255, 0) if not self.emergency_stop else (0, 0, 255)
+        status_text = "🟢 RUNNING" if not self.emergency_stop else "🔴 STOPPED"
+        cv2.putText(frame, status_text, (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.65, status_color, 2)
+        
+        # Deadzone indicator
+        y_offset += 30
+        in_deadzone = abs(dnod) < self.NOD_DEADZONE and abs(dturn) < self.TURN_DEADZONE
+        deadzone_color = (0, 255, 0) if in_deadzone else (0, 200, 255)
+        deadzone_text = "DEADZONE ✓" if in_deadzone else "DEADZONE"
+        cv2.putText(frame, deadzone_text, (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, deadzone_color, 1)
+        
+        # Top-left column continued: Deltas with color coding
         y_offset += 25
+        cv2.putText(frame, "MOTION:", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+        y_offset += 22
         
-        # We'll calculate and display raw positions
-        # For now show the deltas, will add raw in camera_loop
-        cv2.putText(frame, "Facemesh UR7e Control", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        # Nod status
+        if dnod == 0.0:
+            nod_color = (0, 255, 0)  # Green - in deadzone
+            nod_text = "Nod:  NEUTRAL"
+        elif abs(dnod) < self.NOD_THRESHOLD:
+            nod_color = (0, 255, 255)  # Yellow - in yellow zone, no movement
+            nod_text = f"Nod:  {dnod:+6.1f}px 🟡"
+        else:
+            nod_color = (0, 0, 255)  # Red - active
+            nod_text = f"Nod:  {dnod:+6.1f}px {'▲' if dnod < 0 else '▼'}"
+        
+        cv2.putText(frame, nod_text, (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, nod_color, 1)
+        y_offset += 22
+        
+        # Turn status
+        if dturn == 0.0:
+            turn_color = (0, 255, 0)  # Green - in deadzone
+            turn_text = "Turn: NEUTRAL"
+        elif abs(dturn) < self.TURN_THRESHOLD:
+            turn_color = (0, 255, 255)  # Yellow - in yellow zone, no movement
+            turn_text = f"Turn: {dturn:+6.1f}px 🟡"
+        else:
+            turn_color = (0, 0, 255)  # Red - active
+            turn_text = f"Turn: {dturn:+6.1f}px {'◀' if dturn < 0 else '▶'}"
+        
+        cv2.putText(frame, turn_text, (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, turn_color, 1)
+        
+        # Eye status with blink timers (top-left, below motion)
+        y_offset += 28
+        cv2.putText(frame, "EYE BLINKS:", (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+        y_offset += 22
+        
+        # Left eye indicator
+        left_eye_color = (255, 0, 0) if left_ear < self.EAR_THRESH else (0, 255, 0)
+        left_eye_text = f"L-Eye: {'●' if left_ear < self.EAR_THRESH else '○'} {left_blink_hold_time:.2f}s"
+        cv2.putText(frame, left_eye_text, (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, left_eye_color, 1)
+        y_offset += 20
+        
+        # Right eye indicator
+        right_eye_color = (255, 0, 0) if right_ear < self.EAR_THRESH else (0, 255, 0)
+        right_eye_text = f"R-Eye: {'●' if right_ear < self.EAR_THRESH else '○'} {right_blink_hold_time:.2f}s"
+        cv2.putText(frame, right_eye_text, (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, right_eye_color, 1)
+        y_offset += 20
+        
+        # Both eyes indicator for mode toggle
+        both_eyes_color = (255, 0, 0) if left_ear < self.EAR_THRESH and right_ear < self.EAR_THRESH else (0, 255, 0)
+        both_blink_bar = "█" * min(10, int(both_blink_hold_time * 10))
+        both_eyes_text = f"Mode: {both_blink_bar} {both_blink_hold_time:.2f}s"
+        cv2.putText(frame, both_eyes_text, (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, both_eyes_color, 1)
+        
+        # Top-center column: Active Command
+        y_offset = 25
+        cv2.putText(frame, "COMMAND:", (350, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
         y_offset += 30
         
-        # === DELTA (smoothed) ===
-        cv2.putText(frame, "=== DELTA (smoothed) ===", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        y_offset += 25
+        command_text = "(neutral)"
+        command_color = (0, 255, 0)
         
-        # Color code: GREEN=deadzone, CYAN=below threshold, RED=command active
-        nod_color = (0, 255, 0) if dnod == 0.0 else ((0, 0, 255) if abs(dnod) > self.NOD_THRESHOLD else (0, 255, 255))
-        turn_color = (0, 255, 0) if dturn == 0.0 else ((0, 0, 255) if abs(dturn) > self.TURN_THRESHOLD else (0, 255, 255))
-        tilt_color = (0, 255, 0) if dtilt == 0.0 else ((0, 0, 255) if abs(dtilt) > self.TILT_THRESHOLD else (0, 255, 255))
+        if control_mode_2:
+            # MODE 2: Wrist control commands
+            if dturn < -self.TURN_THRESHOLD:
+                command_text = "◀ ROTATE LEFT"
+                command_color = (0, 0, 255)
+            elif dturn > self.TURN_THRESHOLD:
+                command_text = "▶ ROTATE RIGHT"
+                command_color = (0, 0, 255)
+            elif dnod < -self.NOD_THRESHOLD:
+                command_text = "▲ EXTEND ARM"
+                command_color = (0, 0, 255)
+            elif dnod > self.NOD_THRESHOLD:
+                command_text = "▼ RETRACT ARM"
+                command_color = (0, 0, 255)
+        else:
+            # MODE 1: Shoulder control commands
+            if dturn < -self.TURN_THRESHOLD:
+                command_text = "◀ TURN LEFT"
+                command_color = (0, 0, 255)
+            elif dturn > self.TURN_THRESHOLD:
+                command_text = "▶ TURN RIGHT"
+                command_color = (0, 0, 255)
+            elif dnod < -self.NOD_THRESHOLD:
+                command_text = "▲ NOD UP"
+                command_color = (0, 0, 255)
+            elif dnod > self.NOD_THRESHOLD:
+                command_text = "▼ NOD DOWN"
+                command_color = (0, 0, 255)
         
-        cv2.putText(frame, f"dNod:   {dnod:7.2f} px", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, nod_color, 2)
-        y_offset += 25
-        cv2.putText(frame, f"dTurn:  {dturn:7.2f} px", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, turn_color, 2)
-        y_offset += 25
-        cv2.putText(frame, f"dTilt:  {np.degrees(dtilt):7.2f} deg", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, tilt_color, 2)
-
-        # === COMMANDS ===
+        cv2.putText(frame, command_text, (350, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.65, command_color, 2)
+        
+        # Top-right column: Mouth and Grasp status
+        y_offset = 25
+        mouth_color = (0, 165, 255) if mouth_open else (0, 255, 0)
+        mouth_icon = "🔴" if mouth_open else "⭕"
+        mouth_text = f"MOUTH {mouth_icon}"
+        cv2.putText(frame, mouth_text, (650, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, mouth_color, 2)
         y_offset += 35
-        cv2.putText(frame, "=== COMMANDS ===", (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        y_offset += 25
-
-        command_shown = False
-
-        # TURN command - based on MOUTH horizontal position
-        if dturn < -self.TURN_THRESHOLD:
-            cv2.putText(frame, "Turn LEFT (mouth moves left)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            command_shown = True
-            y_offset += 30
-        elif dturn > self.TURN_THRESHOLD:
-            cv2.putText(frame, "Turn RIGHT (mouth moves right)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            command_shown = True
-            y_offset += 30
-
-        # NOD command - based on FACE vertical position
-        if dnod < -self.NOD_THRESHOLD:
-            cv2.putText(frame, "Nod UP (face moves up)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            command_shown = True
-            y_offset += 30
-        elif dnod > self.NOD_THRESHOLD:
-            cv2.putText(frame, "Nod DOWN (face moves down)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            command_shown = True
-            y_offset += 30
-
-        # TILT command - based on EYE LINE angle
-        if dtilt < -self.TILT_THRESHOLD:
-            cv2.putText(frame, "Tilt LEFT (left eye higher)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            command_shown = True
-            y_offset += 30
-        elif dtilt > self.TILT_THRESHOLD:
-            cv2.putText(frame, "Tilt RIGHT (right eye higher)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            command_shown = True
-            y_offset += 30
         
-        if not command_shown:
-            cv2.putText(frame, "(neutral - no command)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            y_offset += 30
-
-        # === BLINK & MOUTH STATUS ===
-        y_offset += 10
-        blink_status = ""
-        blink_color = (255, 255, 255)
+        # Thresholds reference
+        cv2.putText(frame, "Thresholds:", (650, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+        y_offset += 22
+        cv2.putText(frame, f"Turn: ±{self.TURN_THRESHOLD:.0f}px", (650, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+        y_offset += 18
+        cv2.putText(frame, f"Nod: ±{self.NOD_THRESHOLD:.0f}px", (650, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+        y_offset += 18
+        cv2.putText(frame, f"Deadzone: {self.TURN_DEADZONE:.0f}px", (650, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
         
-        if ear < self.EAR_THRESH:
-            if long_blink:
-                blink_status = "✊✊✊ GRASP TRIGGERED! ✊✊✊"
-                blink_color = (0, 0, 255)  # Red - active grasp!
-            else:
-                blink_status = f"Eyes closed - Hold for >1s to grasp! ({blink_duration:.1f}s, EAR={ear:.3f})"
-                blink_color = (0, 165, 255)  # Orange - blink detected
-        else:
-            blink_status = f"Eyes open (EAR={ear:.3f})"
-            blink_color = (0, 255, 0)  # Green - normal
-
-        cv2.putText(frame, blink_status, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, blink_color, 3)  # Larger text for grasp status
-        y_offset += 25
-
-        # Mouth detection (toggle state)
-        if self.emergency_stop:
-            cv2.putText(frame, f"STOP ACTIVE (toggle: open mouth again to release)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        elif mouth_open:
-            cv2.putText(frame, "Mouth open (will toggle stop)", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
-        else:
-            cv2.putText(frame, "Mouth closed", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
-        # Instructions at bottom
-        cv2.putText(frame, "Press 'r' to recenter | 'q' to quit | Ctrl+C to stop", 
-                   (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+        # Bottom instruction bar
+        instructions = "BOTH EYES BLINK=MODE  |  L-BLINK=STOP  |  R-BLINK=CENTER  |  MOUTH=GRASP"
+        cv2.putText(frame, instructions,
+                   (10, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1)
     
     def draw_mesh(self, frame, result, lm, pts, w, h):
         """Draw face mesh and key landmarks on frame."""
@@ -621,7 +731,7 @@ class FacemeshUR7eControlNode(Node):
             cv2.circle(frame, (x, y), 1, (0, 255, 255), -1)
         
         # Highlight key landmarks
-        # Eyes (for tilt) - Blue
+        # Eyes - Blue
         cv2.circle(frame, (int(lm[33].x * w), int(lm[33].y * h)), 5, (255, 0, 0), -1)  # Left eye
         cv2.circle(frame, (int(lm[263].x * w), int(lm[263].y * h)), 5, (255, 0, 0), -1)  # Right eye
         
@@ -669,15 +779,57 @@ class FacemeshUR7eControlNode(Node):
         
         self.pub.publish(traj)
     
+    def toggle_gripper_service(self):
+        """Call gripper toggle service to fully open/close gripper."""
+        if not self.gripper_cli.wait_for_service(timeout_sec=1.0):
+            self.get_logger().warn("Gripper service not available", throttle_duration_sec=2.0)
+            return
+        
+        req = Trigger.Request()
+        future = self.gripper_cli.call_async(req)
+        
+        # Wait for the service call to complete (blocking)
+        try:
+            rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+            response = future.result()
+            if response.success:
+                self.get_logger().info("✊ Gripper toggled (will fully open/close)!")
+            else:
+                self.get_logger().warn(f"Gripper toggle failed: {response.message}")
+        except Exception as e:
+            self.get_logger().error(f"Gripper service error: {e}")
+    
     def recenter_neutral(self):
-        """Recenter the neutral pose (called from keyboard handler)."""
-        # This will be called when 'r' is pressed
-        # Reset filters and wait for next frame to set new neutral
+        """Recenter the neutral pose (called from right eye blink)."""
+        # Reset filters and neutral tracking so next frame sets new neutral
         self.neutral_set = False
         self.face_y_filter.reset()
         self.mouth_x_filter.reset()
-        self.tilt_filter.reset()
-        self.get_logger().info("Recenter requested - will set new neutral on next frame")
+        self.get_logger().info("🎯 Neutral pose reset - will recenter on next frame")
+    
+    def play_beep(self, frequency=1000, duration=0.2, sample_rate=44100):
+        """Play a beep sound at specified frequency."""
+        try:
+            # Generate sine wave
+            num_samples = int(sample_rate * duration)
+            frames = []
+            for i in range(num_samples):
+                sample = int(32767.0 * 0.5 * math.sin(2.0 * math.pi * frequency * i / sample_rate))
+                frames.append((sample & 0xFF).to_bytes(1, 'little'))
+                frames.append(((sample >> 8) & 0xFF).to_bytes(1, 'little'))
+            
+            # Write to temporary wave file and play
+            temp_file = "/tmp/mode_beep.wav"
+            with wave.open(temp_file, 'wb') as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(b''.join(frames))
+            
+            # Play the sound using system command
+            os.system(f"aplay {temp_file} &> /dev/null &")
+        except Exception as e:
+            self.get_logger().warn(f"Could not play beep sound: {e}", throttle_duration_sec=5.0)
     
     def shutdown(self):
         """Cleanup resources."""
