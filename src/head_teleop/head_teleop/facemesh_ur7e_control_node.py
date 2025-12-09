@@ -137,8 +137,8 @@ class FacemeshUR7eControlNode(Node):
             10
         )
         
-        self.get_logger().info("Subscribed to /joint_states topic")
-        self.get_logger().info("Publishing to /scaled_joint_trajectory_controller/joint_trajectory")
+        self.get_logger().info("📡 Subscribed to /joint_states topic")
+        self.get_logger().info("📤 Publishing to /scaled_joint_trajectory_controller/joint_trajectory")
         
         # Publisher for joint trajectory
         self.pub = self.create_publisher(
@@ -255,7 +255,7 @@ class FacemeshUR7eControlNode(Node):
         
         if not self.got_joint_states:
             self.got_joint_states = True
-            self.get_logger().info("Received joint states! Robot controller is active.")
+            self.get_logger().info("✅ Received joint states! Robot controller is active.")
             self.get_logger().info(f"   Initial positions: {[f'{p:.3f}' for p in self.joint_positions]}")
     
     def camera_loop(self):
@@ -289,7 +289,7 @@ class FacemeshUR7eControlNode(Node):
                     cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_NORMAL)
                     cv2.resizeWindow("Facemesh UR7e Control", 1280, 960)
                     self.window_created = True
-                    self.get_logger().info("OpenCV GUI window created and displaying camera feed!")
+                    self.get_logger().info("✅ OpenCV GUI window created and displaying camera feed!")
                 
                 cv2.imshow("Facemesh UR7e Control", frame)
                 cv2.setWindowProperty("Facemesh UR7e Control", cv2.WND_PROP_TOPMOST, 1)
@@ -364,7 +364,7 @@ class FacemeshUR7eControlNode(Node):
                     self.mode_toggle_triggered = True
                     self.control_mode_2 = not self.control_mode_2
                     mode_name = "MODE 2 (Wrist Control)" if self.control_mode_2 else "MODE 1 (Shoulder Control)"
-                    self.get_logger().info(f"CONTROL MODE CHANGED to {mode_name} - Both eyes held closed for {both_blink_hold_time:.2f}s!")
+                    self.get_logger().info(f"🔄 CONTROL MODE CHANGED to {mode_name} - Both eyes held closed for {both_blink_hold_time:.2f}s!")
                     self.play_beep(frequency=1000, duration=0.3)  # Play beep on mode change
         else:
             if self.both_eyes_closed:
@@ -385,9 +385,9 @@ class FacemeshUR7eControlNode(Node):
                     self.left_blink_triggered = True
                     self.emergency_stop = not self.emergency_stop
                     if self.emergency_stop:
-                        self.get_logger().warn(f"EMERGENCY STOP - Left eye blink held for {left_blink_hold_time:.2f}s")
+                        self.get_logger().warn(f"🛑 EMERGENCY STOP - Left eye blink held for {left_blink_hold_time:.2f}s")
                     else:
-                        self.get_logger().info(f"Emergency stop released - Left eye blink held for {left_blink_hold_time:.2f}s")
+                        self.get_logger().info(f"✅ Emergency stop released - Left eye blink held for {left_blink_hold_time:.2f}s")
         else:
             if self.left_eye_closed:
                 self.left_eye_closed = False
@@ -406,7 +406,7 @@ class FacemeshUR7eControlNode(Node):
                     right_blink_triggered = True
                     self.right_blink_triggered = True
                     self.recenter_neutral()
-                    self.get_logger().info(f"Recentering - Right eye blink held for {right_blink_hold_time:.2f}s")
+                    self.get_logger().info(f"🎯 Recentering - Right eye blink held for {right_blink_hold_time:.2f}s")
         else:
             if self.right_eye_closed:
                 self.right_eye_closed = False
@@ -430,7 +430,7 @@ class FacemeshUR7eControlNode(Node):
             if mouth_open_duration >= self.BLINK_HOLD_TIME and not self.grasp_toggled:
                 grasp_triggered = True
                 self.grasp_toggled = True
-                self.get_logger().info(f"GRASP TOGGLE - Mouth held open for {mouth_open_duration:.2f}s")
+                self.get_logger().info(f"✊ GRASP TOGGLE - Mouth held open for {mouth_open_duration:.2f}s")
         elif not mouth_open and self.mouth_was_open:
             self.mouth_was_open = False
             self.grasp_toggled = False
@@ -447,7 +447,7 @@ class FacemeshUR7eControlNode(Node):
                     cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_NORMAL)
                     cv2.resizeWindow("Facemesh UR7e Control", 1280, 960)
                     self.window_created = True
-                    self.get_logger().info("OpenCV GUI window created and displaying camera feed!")
+                    self.get_logger().info("✅ OpenCV GUI window created and displaying camera feed!")
                 
                 cv2.imshow("Facemesh UR7e Control", frame)
                 cv2.setWindowProperty("Facemesh UR7e Control", cv2.WND_PROP_TOPMOST, 1)
@@ -461,7 +461,7 @@ class FacemeshUR7eControlNode(Node):
             if time.time() > self.joint_states_timeout:
                 self.got_joint_states = True
                 self.get_logger().warn(
-                    "WARNING: Joint states not received after 5 seconds. Proceeding anyway with default positions."
+                    "⚠️  Joint states not received after 5 seconds. Proceeding anyway with default positions."
                 )
                 self.get_logger().warn("    Make sure the robot controller is running and publishing /joint_states")
             else:
@@ -476,7 +476,7 @@ class FacemeshUR7eControlNode(Node):
                         cv2.namedWindow("Facemesh UR7e Control", cv2.WINDOW_NORMAL)
                         cv2.resizeWindow("Facemesh UR7e Control", 1280, 960)
                         self.window_created = True
-                        self.get_logger().info("OpenCV GUI window created and displaying camera feed!")
+                        self.get_logger().info("✅ OpenCV GUI window created and displaying camera feed!")
                     
                     cv2.imshow("Facemesh UR7e Control", frame)
                     cv2.setWindowProperty("Facemesh UR7e Control", cv2.WND_PROP_TOPMOST, 1)
@@ -501,15 +501,15 @@ class FacemeshUR7eControlNode(Node):
             # Nod up (negative dnod) = extend arm, Nod down (positive dnod) = retract arm
             if abs(dnod) > self.NOD_THRESHOLD:
                 # Move shoulder_lift and elbow in opposite directions to extend/retract
-                # When shoulder_lift goes up, elbow goes down (and vice versa) to extend the arm
+                # Flipped: nod up should extend, nod down should retract
                 arm_movement = dnod * self.pitch_to_lift_gain  # Nod up (negative dnod) = extend
-                new_positions[1] += arm_movement  # shoulder_lift_joint moves in one direction
-                new_positions[2] -= arm_movement  # elbow_joint moves in opposite direction to extend
-            
-            # Wrist must always stay perpendicular (90 degrees) to plane
-            # wrist_1_joint = -(shoulder_lift_joint + elbow_joint) to maintain 90 degrees
-            # This is set always, not just during extend/retract
-            new_positions[3] = -(new_positions[1] + new_positions[2])
+                new_positions[1] -= arm_movement  # shoulder_lift_joint (flipped assignment)
+                new_positions[2] += arm_movement  # elbow_joint (flipped assignment)
+                
+                # Wrist counteraction: move wrist_1_joint opposite to maintain gripper at 90deg
+                # Since we're moving both shoulder and elbow, we need double the wrist compensation
+                delta_wrist1 = -arm_movement * self.pitch_to_wrist_gain * 2.0  # Double compensation for both joints
+                new_positions[3] += delta_wrist1  # wrist_1_joint counteracts shoulder/elbow movement
         else:
             # MODE 1: Shoulder control (default)
             # Turn (yaw) → shoulder_pan_joint
@@ -586,7 +586,7 @@ class FacemeshUR7eControlNode(Node):
         y_offset += 40
         in_deadzone = abs(dnod) < self.NOD_DEADZONE and abs(dturn) < self.TURN_DEADZONE
         deadzone_color = (0, 255, 0) if in_deadzone else (0, 200, 255)
-        deadzone_text = "DEADZONE OK" if in_deadzone else "DEADZONE"
+        deadzone_text = "DEADZONE ACTIVE" if in_deadzone else "DEADZONE"
         cv2.putText(frame, deadzone_text, (10, y_offset),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, deadzone_color, 2)
         
@@ -602,10 +602,11 @@ class FacemeshUR7eControlNode(Node):
             nod_text = "Nod:  NEUTRAL"
         elif abs(dnod) < self.NOD_THRESHOLD:
             nod_color = (0, 255, 255)  # Yellow - in yellow zone, no movement
-            nod_text = f"Nod:  {dnod:+6.1f}px (YELLOW)"
+            nod_text = f"Nod:  {dnod:+6.1f}px (YELLOW ZONE)"
         else:
             nod_color = (0, 0, 255)  # Red - active
-            nod_text = f"Nod:  {dnod:+6.1f}px {'UP' if dnod < 0 else 'DOWN'}"
+            direction = "UP" if dnod < 0 else "DOWN"
+            nod_text = f"Nod:  {dnod:+6.1f}px {direction}"
         
         cv2.putText(frame, nod_text, (10, y_offset),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, nod_color, 2)
@@ -617,10 +618,11 @@ class FacemeshUR7eControlNode(Node):
             turn_text = "Turn: NEUTRAL"
         elif abs(dturn) < self.TURN_THRESHOLD:
             turn_color = (0, 255, 255)  # Yellow - in yellow zone, no movement
-            turn_text = f"Turn: {dturn:+6.1f}px (YELLOW)"
+            turn_text = f"Turn: {dturn:+6.1f}px (YELLOW ZONE)"
         else:
             turn_color = (0, 0, 255)  # Red - active
-            turn_text = f"Turn: {dturn:+6.1f}px {'LEFT' if dturn < 0 else 'RIGHT'}"
+            direction = "LEFT" if dturn < 0 else "RIGHT"
+            turn_text = f"Turn: {dturn:+6.1f}px {direction}"
         
         cv2.putText(frame, turn_text, (10, y_offset),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, turn_color, 2)
@@ -633,26 +635,26 @@ class FacemeshUR7eControlNode(Node):
         
         # Left eye indicator
         left_eye_color = (255, 0, 0) if left_ear < self.EAR_THRESH else (0, 255, 0)
-        left_eye_status = "CLOSED" if left_ear < self.EAR_THRESH else "OPEN"
-        left_eye_text = f"L-Eye: {left_eye_status} {left_blink_hold_time:.2f}s"
+        left_eye_state = "CLOSED" if left_ear < self.EAR_THRESH else "OPEN"
+        left_eye_text = f"L-Eye: {left_eye_state} {left_blink_hold_time:.2f}s"
         cv2.putText(frame, left_eye_text, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, left_eye_color, 2)
-        y_offset += 30
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.65, left_eye_color, 2)
+        y_offset += 28
         
         # Right eye indicator
         right_eye_color = (255, 0, 0) if right_ear < self.EAR_THRESH else (0, 255, 0)
-        right_eye_status = "CLOSED" if right_ear < self.EAR_THRESH else "OPEN"
-        right_eye_text = f"R-Eye: {right_eye_status} {right_blink_hold_time:.2f}s"
+        right_eye_state = "CLOSED" if right_ear < self.EAR_THRESH else "OPEN"
+        right_eye_text = f"R-Eye: {right_eye_state} {right_blink_hold_time:.2f}s"
         cv2.putText(frame, right_eye_text, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, right_eye_color, 2)
-        y_offset += 30
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.65, right_eye_color, 2)
+        y_offset += 28
         
         # Both eyes indicator for mode toggle
         both_eyes_color = (255, 0, 0) if left_ear < self.EAR_THRESH and right_ear < self.EAR_THRESH else (0, 255, 0)
-        both_blink_bar = "=" * min(10, int(both_blink_hold_time * 10))
-        both_eyes_text = f"Mode: {both_blink_bar} {both_blink_hold_time:.2f}s"
+        both_blink_bar = "=" * min(20, int(both_blink_hold_time * 10))
+        both_eyes_text = f"Mode Toggle: {both_blink_bar} {both_blink_hold_time:.2f}s"
         cv2.putText(frame, both_eyes_text, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, both_eyes_color, 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.65, both_eyes_color, 2)
         
         # Top-center column: Active Command
         y_offset = 30
@@ -693,16 +695,16 @@ class FacemeshUR7eControlNode(Node):
                 command_color = (0, 0, 255)
         
         cv2.putText(frame, command_text, (350, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, command_color, 3)
+                   cv2.FONT_HERSHEY_SIMPLEX, 1.0, command_color, 3)
         
         # Top-right column: Mouth and Grasp status
         y_offset = 30
         mouth_color = (0, 165, 255) if mouth_open else (0, 255, 0)
-        mouth_status = "OPEN" if mouth_open else "CLOSED"
-        mouth_text = f"MOUTH: {mouth_status}"
+        mouth_state = "OPEN" if mouth_open else "CLOSED"
+        mouth_text = f"MOUTH: {mouth_state}"
         cv2.putText(frame, mouth_text, (650, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, mouth_color, 3)
-        y_offset += 45
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, mouth_color, 3)
+        y_offset += 40
         
         # Thresholds reference
         cv2.putText(frame, "Thresholds:", (650, y_offset),
@@ -795,7 +797,7 @@ class FacemeshUR7eControlNode(Node):
             rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
             response = future.result()
             if response.success:
-                self.get_logger().info("Gripper toggled (will fully open/close)!")
+                self.get_logger().info("✊ Gripper toggled (will fully open/close)!")
             else:
                 self.get_logger().warn(f"Gripper toggle failed: {response.message}")
         except Exception as e:
@@ -807,7 +809,7 @@ class FacemeshUR7eControlNode(Node):
         self.neutral_set = False
         self.face_y_filter.reset()
         self.mouth_x_filter.reset()
-        self.get_logger().info("Neutral pose reset - will recenter on next frame")
+        self.get_logger().info("🎯 Neutral pose reset - will recenter on next frame")
     
     def play_beep(self, frequency=1000, duration=0.2, sample_rate=44100):
         """Play a beep sound at specified frequency."""
