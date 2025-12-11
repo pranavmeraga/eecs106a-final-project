@@ -13,25 +13,44 @@ Control a UR7e robotic arm using only head movements and facial gestures - no ph
 
 ## Control Mapping
 
+The system supports **two control modes** that can be toggled during operation:
+
+### MODE 1: Shoulder Control (Default)
 | Human Action | Robot Response | Detection Method |
 |--------------|----------------|------------------|
-| **Turn head left/right** | Base joint rotation (1st DOF) | Mouth horizontal position (±25px threshold) |
-| **Nod up/down** | Limb joint vertical movement (2nd DOF) | Face vertical position (±25px threshold) |
-| **Tilt head left/right** | Limb joint forward/backward (3rd DOF) | Eye line angle (±6.9° threshold) |
-| **Long blink (>1s)** | Toggle gripper open/close | Hold eyes closed |
-| **Open mouth wide** | **Emergency stop** | Immediate zero velocity |
+| **Turn head left/right** | `shoulder_pan_joint` rotation | Mouth horizontal position |
+| **Nod up/down** | `shoulder_lift_joint` movement | Face vertical position |
+| **Open mouth (hold >1s)** | Grasp toggle (alternate grasp/open) | Mouth opening duration |
+
+### MODE 2: Wrist Control
+| Human Action | Robot Response | Detection Method |
+|--------------|----------------|------------------|
+| **Turn head left/right** | `wrist_2_joint` (rotate gripper) | Mouth horizontal position |
+| **Nod up/down** | `shoulder_lift_joint` + `elbow_joint` (extend/retract arm) | Face vertical position |
+| **Automatic compensation** | `wrist_1_joint` maintains 90° gripper angle | Calculated automatically |
+| **Open mouth (hold >1s)** | Grasp toggle (alternate grasp/open) | Mouth opening duration |
+
+### Control Actions (Both Modes)
+| Action | Function | Detection Method |
+|--------|----------|------------------|
+| **Both eyes blink (hold >1s)** | Toggle between MODE 1 and MODE 2 | Both eyes closed simultaneously |
+| **Left eye blink (hold >1s)** | Emergency stop (toggle on/off) | Left eye closed only |
+| **Right eye blink (hold >1s)** | Recenter neutral pose | Right eye closed only |
 
 ### Control Behavior
-- **Velocity Control**: Robot moves while you hold the gesture. Return to neutral to stop.
-- **Large Deadzones**: Stable neutral zone (10px for position, ~3° for angles) prevents unintended commands
-- **Independent Detection**: Each motion type uses distinct measurement (mouth X, face Y, eye angle)
-- **Deliberate Movements**: Thresholds require clear, intentional gestures (not micro-movements)
-- **Recenter Anytime**: Press 'r' to set current head position as new neutral reference
+- **Incremental Control**: Robot joints adjust continuously based on head movements from neutral pose
+- **Responsive Deadzones**: Small deadzones (2px) for responsive control while preventing drift
+- **Independent Detection**: Each motion type uses distinct measurement (mouth X, face Y)
+- **Mode Toggle**: Switch between shoulder and wrist control modes with both-eyes blink
+- **Recenter Anytime**: Right eye blink (hold >1s) to set current head position as new neutral reference
+- **Visual Feedback**: OpenCV GUI window shows live camera feed with control status and mode indicator
 
 ### How Each Motion Works
 - **TURN**: Tracks horizontal position of mouth center - mouth moves left/right in frame
 - **NOD**: Tracks vertical position of entire face (nose, chin, forehead) - whole face moves up/down in frame
-- **TILT**: Tracks angle of line connecting eyes - one eye becomes higher than the other
+- **MODE TOGGLE**: Both eyes closed simultaneously for >1s switches between shoulder and wrist control
+- **EMERGENCY STOP**: Left eye closed for >1s toggles emergency stop (holds current position)
+- **RECENTER**: Right eye closed for >1s resets neutral pose to current head position
 
 ## Installation
 
@@ -90,7 +109,7 @@ python facemesh_preview.py --camera 1
 #### 1. Launch Head Tracking
 ```bash
 source install/setup.bash
-ros2 launch head_teleop facemesh_ur7e_control_node.py
+ros2 launch head_teleop head_teleop_launch.py
 ```
 
 #### 2. Launch UR7e Driver (separate terminal)
@@ -153,7 +172,7 @@ This method directly controls UR7e joints using facemesh detection, similar to t
 
    **Method A: Using launch file (recommended)**
    ```bash
-   # Using default camera (index 0) - shows live GUI
+   # Using default camera - shows live GUI with mode indicator
    ros2 launch head_teleop facemesh_ur7e_control_launch.py
    
    # Using a different camera (e.g., Logitech camera at index 1)
@@ -165,7 +184,7 @@ This method directly controls UR7e joints using facemesh detection, similar to t
 
    **Method B: Direct node execution**
    ```bash
-   # Using default camera (index 0)
+   # Using default camera
    ros2 run head_teleop facemesh_ur7e_control
    
    # Using a different camera (e.g., Logitech camera at index 1)
@@ -178,27 +197,51 @@ This method directly controls UR7e joints using facemesh detection, similar to t
 3. **Control the robot**:
    - The node will automatically open an **OpenCV GUI window** showing:
      - **Live camera feed** with face mesh overlay
-     - **Real-time head movement deltas** (dNod, dTurn, dTilt) with color coding
-     - **Status indicators** (OK, Emergency Stop, Long Blink)
-     - **Eye aspect ratio (EAR)** and mouth status
-     - **Control instructions**
+     - **Current control mode** (MODE 1: SHOULDER or MODE 2: WRIST) with color indicator
+     - **Real-time head movement deltas** (dNod, dTurn) with color coding
+     - **Eye status** (Left, Right, Both) with blink hold timers
+     - **Mouth status** and grasp toggle indicator
+     - **Control instructions** and keyboard shortcuts
+   
+   **MODE 1 (Shoulder Control) - Default:**
    - **Turn head left/right** → Controls `shoulder_pan_joint` (base rotation)
    - **Nod up/down** → Controls `shoulder_lift_joint` (vertical movement)
-   - **Tilt head left/right** → Controls `elbow_joint` (forward/backward)
-   - **Long blink (>1s)** → Adjusts `wrist_1_joint`
-   - **Open mouth wide** → Emergency stop (holds current position)
-   - **Press 'r'** in the OpenCV window → Recenter neutral pose
+   
+   **MODE 2 (Wrist Control):**
+   - **Turn head left/right** → Controls `wrist_2_joint` (rotate gripper)
+   - **Nod up/down** → Controls `shoulder_lift_joint` + `elbow_joint` (extend/retract arm)
+   - **Automatic wrist_1 compensation** → Maintains 90° gripper angle
+   
+   **Control Actions:**
+   - **Both eyes blink (hold >1s)** → Toggle between MODE 1 and MODE 2 (beep sound confirms)
+   - **Left eye blink (hold >1s)** → Emergency stop toggle (holds current position)
+   - **Right eye blink (hold >1s)** → Recenter neutral pose
+   - **Open mouth (hold >1s)** → Grasp toggle (alternate grasp/open)
    - **Press 'q'** in the OpenCV window → Quit the node
 
 #### Control Mapping Details
 
+**MODE 1 (Shoulder Control):**
 | Head Movement | Joint Controlled | Detection Method |
 |---------------|------------------|------------------|
 | Turn left/right | `shoulder_pan_joint` | Mouth horizontal position |
 | Nod up/down | `shoulder_lift_joint` | Face vertical position |
-| Tilt left/right | `elbow_joint` | Eye line angle |
-| Long blink | `wrist_1_joint` | Eye aspect ratio (EAR) |
-| Open mouth | Emergency stop | Mouth opening distance |
+| Open mouth (hold >1s) | Grasp toggle | Mouth opening duration |
+
+**MODE 2 (Wrist Control):**
+| Head Movement | Joint Controlled | Detection Method |
+|---------------|------------------|------------------|
+| Turn left/right | `wrist_2_joint` | Mouth horizontal position |
+| Nod up/down | `shoulder_lift_joint` + `elbow_joint` | Face vertical position |
+| Automatic | `wrist_1_joint` compensation | Calculated to maintain 90° angle |
+| Open mouth (hold >1s) | Grasp toggle | Mouth opening duration |
+
+**Control Actions (Both Modes):**
+| Action | Function | Detection Method |
+|--------|----------|------------------|
+| Both eyes blink (hold >1s) | Toggle MODE 1 ↔ MODE 2 | Both eyes closed simultaneously |
+| Left eye blink (hold >1s) | Emergency stop toggle | Left eye closed only |
+| Right eye blink (hold >1s) | Recenter neutral pose | Right eye closed only |
 
 #### Safety Notes
 
@@ -206,9 +249,11 @@ This method directly controls UR7e joints using facemesh detection, similar to t
 - **DO NOT input random angles** - This will cause the robot to emergency stop
 - Always start with the robot in a **safe tuck position**
 - The node uses **incremental control** - it adjusts joint positions based on head movements from a neutral pose
-- **Open your mouth wide** to trigger emergency stop at any time
+- **Left eye blink (hold >1s)** to toggle emergency stop at any time
 - Keep the **e-stop button** accessible at all times
 - The node publishes trajectories with `time_from_start.sec = 5` for smooth motion
+- **Mode switching**: Use both-eyes blink carefully - beep sound confirms mode change
+- **Recenter often**: Use right-eye blink to recenter when changing posture
 
 #### Testing with Safe Joint Angles
 
@@ -231,7 +276,9 @@ After running `ros2 run ur7e_utils tuck`, you can test with these safe joint ang
 - Verify `enable_comms` is running
 - Check joint states: `ros2 topic echo /joint_states`
 - Verify trajectory publishing: `ros2 topic echo /scaled_joint_trajectory_controller/joint_trajectory`
-- Make sure you've recentered with 'r' key after starting
+- Make sure you've recentered with right-eye blink after starting
+- Check if emergency stop is active (left-eye blink to toggle)
+- Verify you're in the correct control mode (both-eyes blink to toggle)
 
 **Face not detected:**
 - Ensure good lighting (front-facing, avoid backlighting)
@@ -242,7 +289,9 @@ After running `ros2 run ur7e_utils tuck`, you can test with these safe joint ang
 
 - **Incremental control**: Facemesh node adjusts joints incrementally based on head movements, while keyboard controller moves joints by fixed steps
 - **Continuous control**: Head movements provide smooth, continuous control vs. discrete key presses
-- **Safety features**: Built-in emergency stop via mouth opening detection
+- **Dual modes**: Two control modes (shoulder vs wrist) that can be toggled during operation
+- **Safety features**: Built-in emergency stop toggle via left-eye blink
+- **Visual feedback**: Live GUI window with mode indicator and status information
 
 ## Project Structure
 ```
@@ -287,29 +336,36 @@ TILT_DEADZONE = 0.05      # radians ~2.9° - stable center for tilt
 ```
 
 ### Robot Control Gains
-Edit `head_teleop_mapper_node.py` (lines 48-54):
+Edit `facemesh_ur7e_control_node.py`:
 ```python
-# Detection thresholds (radians)
-self.yaw_threshold = 0.08
-self.pitch_threshold = 0.08
-self.roll_threshold = 0.08
-self.deadzone = 0.05
+# Detection thresholds (pixels)
+self.TURN_THRESHOLD = 18.0     # pixels
+self.NOD_THRESHOLD = 18.0      # pixels
 
-# Velocity control gains
-self.base_yaw_gain = 0.5     # Base rotation speed
-self.limb_pitch_gain = 0.5   # Limb vertical speed
-self.limb_roll_gain = 0.5    # Limb forward/back speed
+# Deadzones (pixels)
+self.TURN_DEADZONE = 2.0       # pixels - responsive for turning
+self.NOD_DEADZONE = 2.0        # pixels - responsive for nodding
+
+# Control gains for MODE 1 (shoulder control)
+self.yaw_to_pan_gain = 0.15    # radians per pixel (turn → shoulder_pan)
+self.pitch_to_lift_gain = 0.15  # radians per pixel (nod → shoulder_lift)
+
+# Control gains for MODE 2 (wrist control)
+self.yaw_to_wrist2_gain = 1.0   # radians per pixel (turn → wrist_2_joint)
+self.pitch_to_wrist1_gain = 1.0 # radians per pixel (nod → wrist_1_joint)
 ```
 
 ### Blink & Mouth Detection
-Edit `head_pose_blink_node.py`:
+Edit `facemesh_ur7e_control_node.py`:
 ```python
 # Eye detection
-EAR_THRESH = 0.21         # Eye aspect ratio threshold
-GRASP_BLINK_TIME = 1.0    # Long blink duration (seconds)
+self.EAR_THRESH = 0.21              # Eye aspect ratio threshold
+self.BLINK_HOLD_TIME = 1.0          # Blink hold duration (seconds)
+self.MODE_TOGGLE_HOLD_TIME = 1.0    # Mode toggle hold time (seconds)
 
 # Mouth detection
-MOUTH_OPEN_THRESH = 0.03  # Mouth open threshold (relative)
+self.MOUTH_OPEN_THRESH = 0.03       # Mouth open threshold (relative)
+self.MOUTH_HOLD_TIME = 1.0          # Mouth hold time for grasp toggle (seconds)
 ```
 
 ### Smoothing
@@ -337,16 +393,22 @@ python facemesh_preview.py --camera 1  # External
 - Try toggling mirror mode with 'm'
 
 ### Commands Always Active (No Neutral Zone)
-- **Press 'r' to recenter** at comfortable position
+- **Right-eye blink (hold >1s) to recenter** at comfortable position
 - Check all delta values show **0.00** and **GREEN** after recentering
-- If still issues, increase deadzones in code
-- Watch the colored circles on screen to verify tracking
+- If still issues, the deadzones are set to 2px for responsive control
+- Watch the GUI overlay to verify tracking and mode status
 
-### One Motion Confused with Another
-- **Turn vs Tilt**: Turn shows mouth moving horizontally; tilt shows eyes at different heights
-- **Nod vs Tilt**: Nod shows whole face moving vertically; tilt shows eye angle change
-- Use visual markers (colored circles) to debug which landmarks are being tracked
-- Ensure lighting is even (shadows can confuse detection)
+### Mode Toggle Not Working
+- **Both eyes must be closed simultaneously** for >1s to toggle modes
+- Listen for beep sound to confirm mode change
+- Check GUI window shows correct mode (MODE 1: SHOULDER or MODE 2: WRIST)
+- Make sure you're not accidentally triggering single-eye blinks
+
+### Control Not Responsive
+- The system uses small deadzones (2px) for responsive control
+- Make deliberate head movements - small micro-movements may not register
+- Recenter with right-eye blink if control feels off
+- Check that emergency stop is not active (left-eye blink to toggle)
 
 ### Topics Not Connecting
 ```bash
@@ -395,9 +457,11 @@ ros2 topic echo /stop_cmd
 ### Algorithm Details
 - **Turn Detection**: Tracks horizontal position (X coordinate) of mouth center
 - **Nod Detection**: Tracks vertical position (Y coordinate) of face center (nose, chin, forehead average)
-- **Tilt Detection**: Calculates angle of line connecting left and right eyes using `arctan2(dy, dx)`
-- **Head Pose**: Uses OpenCV `solvePnP` with 6 stable facial landmarks for additional validation
-- **Smoothing**: Exponential moving average filter (α=0.3) for stable readings
+- **Eye Blink Detection**: Separate tracking for left eye, right eye, and both eyes using Eye Aspect Ratio (EAR)
+- **Mouth Detection**: Tracks mouth opening distance for grasp toggle
+- **Mode Toggle**: Both eyes closed simultaneously for >1s triggers mode switch with audio feedback
+- **Smoothing**: Exponential moving average filter for stable readings
+- **Control Modes**: Two distinct control modes with different joint mappings and automatic wrist compensation in MODE 2
 
 ### Key Landmarks Used
 - **Eyes (landmarks 33, 263)**: For tilt angle calculation
@@ -418,25 +482,35 @@ ros2 topic echo /stop_cmd
 - `/grasp_cmd` (Bool): Gripper toggle
 - `/stop_cmd` (Bool): Emergency stop
 
+**Published by `facemesh_ur7e_control_node`:**
+- `/scaled_joint_trajectory_controller/joint_trajectory` (JointTrajectory): Direct joint position commands for UR7e
+
+**Subscribed by `facemesh_ur7e_control_node`:**
+- `/joint_states` (JointState): Current joint positions from UR7e
+
 ## Safety
 
 ⚠️ **Critical Safety Rules:**
-- Always have **emergency stop ready** (mouth open also stop)
+- Always have **emergency stop ready** (left-eye blink to toggle)
 - **Start with LOW gains**, increase gradually after testing
 - **Keep workspace clear** of obstacles and people
 - **Never leave robot unattended** during head-controlled operation
 - Use **teach pendant emergency stop** as backup
 - Establish **safe home position** before starting
 - Define **workspace limits** to prevent collisions
+- **Mode switching**: Be aware of current control mode (check GUI indicator)
+- **Practice mode switching** in safe position before using during operation
 
 ## Performance Tips
 
 1. **Lighting**: Use consistent, front-facing light (avoid backlighting)
 2. **Distance**: Stay 2-3 feet from camera for best tracking
 3. **Deliberate Movements**: Make clear, intentional gestures (not micro-movements)
-4. **Recenter Often**: Press 'r' when changing posture or position
+4. **Recenter Often**: Right-eye blink when changing posture or position
 5. **Practice**: Test with preview tool before controlling robot
-6. **Gains**: Start at 0.1-0.2, increase to 0.5 after comfortable
+6. **Mode Awareness**: Always check GUI to know which control mode is active
+7. **Blink Technique**: For mode toggle, close both eyes simultaneously and hold for >1s
+8. **Gains**: Control gains are optimized for each mode (0.15 for shoulder, 1.0 for wrist)
 
 ## Known Limitations
 
