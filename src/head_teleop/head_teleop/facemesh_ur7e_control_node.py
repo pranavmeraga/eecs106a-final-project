@@ -872,9 +872,22 @@ class FacemeshUR7eControlNode(Node):
         
         try:
             # Get current end-effector pose from TF
-            transform = self.tf_buffer.lookup_transform(
-                'base_link', 'wrist_3_link', rclpy.time.Time()
-            )
+            # Try multiple possible EE frame names for UR7e
+            ee_frames = ['tool0', 'wrist_3_link', 'ee_link', 'flange']
+            transform = None
+            for frame in ee_frames:
+                try:
+                    transform = self.tf_buffer.lookup_transform(
+                        'base_link', frame, rclpy.time.Time()
+                    )
+                    self.get_logger().info(f"✅ Using EE frame: {frame}")
+                    break
+                except:
+                    continue
+            
+            if transform is None:
+                self.get_logger().error(f"Could not find any EE frame in: {ee_frames}")
+                return
             
             # Create PoseStamped from transform
             self.saved_pose = PoseStamped()
@@ -896,7 +909,7 @@ class FacemeshUR7eControlNode(Node):
             self.get_logger().error(f"Failed to save position: {e}")
     
     def return_to_saved_position(self):
-        """Compute IK and plan motion to return to saved position."""
+        """Compute IK and execute motion to return to saved position."""
         if not self.position_saved or self.saved_pose is None:
             self.get_logger().warn("No saved position to return to")
             return
@@ -907,31 +920,33 @@ class FacemeshUR7eControlNode(Node):
         
         self.get_logger().info("🔄 Computing IK to return to saved position...")
         
-        # Compute IK for saved pose
+        # Compute IK for saved pose using existing ik_planner
         ik_result = self.ik_planner.compute_ik(
             self.current_joint_state,
-            self.saved_pose.pose.position.x,
-            self.saved_pose.pose.position.y,
-            self.saved_pose.pose.position.z,
-            self.saved_pose.pose.orientation.x,
-            self.saved_pose.pose.orientation.y,
-            self.saved_pose.pose.orientation.z,
-            self.saved_pose.pose.orientation.w
+            float(self.saved_pose.pose.position.x),
+            float(self.saved_pose.pose.position.y),
+            float(self.saved_pose.pose.position.z),
+            float(self.saved_pose.pose.orientation.x),
+            float(self.saved_pose.pose.orientation.y),
+            float(self.saved_pose.pose.orientation.z),
+            float(self.saved_pose.pose.orientation.w)
         )
         
         if ik_result is None:
             self.get_logger().error("IK computation failed - cannot return to saved position")
             return
         
-        # Plan motion to IK solution
-        trajectory = self.ik_planner.plan_to_joints(ik_result)
-        if trajectory is None:
-            self.get_logger().error("Motion planning failed - cannot return to saved position")
-            return
+        # Extract joint positions from IK solution
+        joint_positions = list(ik_result.position)
+        self.get_logger().info(f"✅ IK solution found: {[f'{p:.3f}' for p in joint_positions]}")
         
-        # Execute the trajectory
-        self.execute_trajectory(trajectory.joint_trajectory)
-        self.get_logger().info("✅ Returning to saved position...")
+        # Publish the trajectory immediately (non-blocking)
+        self.publish_trajectory(joint_positions)
+        self.get_logger().info("📤 Executing return motion...")
+        
+        # Reset saved position after execution so next mouth open will save a new position
+        self.position_saved = False
+        self.saved_pose = None
     
     def execute_trajectory(self, joint_traj):
         """Execute a joint trajectory using the action client."""
