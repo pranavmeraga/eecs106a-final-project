@@ -35,7 +35,7 @@ class IKPlanner(Node):
     # Compute IK for a given (x, y, z) + quat and current robot joint state
     # -----------------------------------------------------------
     def compute_ik(self, current_joint_state, x, y, z,
-                   qx=0.0, qy=1.0, qz=0.0, qw=0.0):
+                   qx=0.0, qy=0.0, qz=0.0, qw=1.0):
         """
         Compute inverse kinematics for a target pose.
         
