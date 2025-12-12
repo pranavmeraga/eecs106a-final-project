@@ -58,7 +58,7 @@ class IKPlanner(Node):
         pose.pose.orientation.w = float(qw)
         
         ik_req = GetPositionIK.Request()
-        ik_req.ik_request.ik_link_name = 'wrist_3_link'
+        ik_req.ik_request.ik_link_name = 'tool0'
         ik_req.ik_request.pose_stamped = pose
         rs = RobotState()
         rs.joint_state = current_joint_state

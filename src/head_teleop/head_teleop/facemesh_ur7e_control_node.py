@@ -127,7 +127,10 @@ def rotation_matrix_to_euler_angles(R: np.ndarray) -> tuple:
 class FacemeshUR7eControlNode(Node):
     def __init__(self, camera_index: int = 0, mirror: bool = True):
         super().__init__('facemesh_ur7e_control_node')
-        
+        self.state_2 = False
+        self.executing_return = False
+        self.executing_moveit = False
+
         self.joint_names = [
             'shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint',
             'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'
@@ -149,10 +152,11 @@ class FacemeshUR7eControlNode(Node):
         
         # Publisher for joint trajectory
         self.pub = self.create_publisher(
-            JointTrajectory, 
-            '/scaled_joint_trajectory_controller/joint_trajectory', 
+            JointTrajectory,
+            '/scaled_joint_trajectory_controller/joint_trajectory',
             10
         )
+
         
         # Gripper service client
         self.gripper_cli = self.create_client(Trigger, '/toggle_gripper')
@@ -166,9 +170,12 @@ class FacemeshUR7eControlNode(Node):
         
         # Action client for executing planned trajectories
         self.exec_ac = ActionClient(
-            self, FollowJointTrajectory,
+            self,
+            FollowJointTrajectory,
             '/scaled_joint_trajectory_controller/follow_joint_trajectory'
         )
+
+
         
         # Position saving for State 1
         self.saved_pose = None  # Saved end-effector pose (PoseStamped)
@@ -574,7 +581,14 @@ class FacemeshUR7eControlNode(Node):
             self.toggle_gripper_service()
         
         # Publish trajectory
-        self.publish_trajectory(new_positions)
+        if self.executing_return:
+            return
+    # Don't stream commands while MoveIt/action is executing
+
+
+        if not self.executing_moveit:
+            self.publish_trajectory(new_positions)
+
         
         # Update display with overlay and show window
         self.draw_overlay(frame, dnod, dturn, left_ear, right_ear, mouth_open, self.control_mode_2,
@@ -884,18 +898,17 @@ class FacemeshUR7eControlNode(Node):
             self.get_logger().error(f"Failed to save position (TF lookup failed): {e}")
     
     def return_to_saved_position(self):
-        """Compute IK and execute motion to return to saved position."""
         if not self.position_saved or self.saved_pose is None:
             self.get_logger().warn("No saved position to return to")
             return
-        
+
         if self.current_joint_state is None:
             self.get_logger().error("Cannot compute IK: No joint state available")
             return
-        
+
         self.get_logger().info("🔄 Computing IK to return to saved position...")
-        
-        # Compute IK for saved pose using existing ik_planner
+
+        # ---- IK ----
         ik_result = self.ik_planner.compute_ik(
             self.current_joint_state,
             float(self.saved_pose.pose.position.x),
@@ -906,35 +919,54 @@ class FacemeshUR7eControlNode(Node):
             float(self.saved_pose.pose.orientation.z),
             float(self.saved_pose.pose.orientation.w)
         )
-        
+
         if ik_result is None:
-            self.get_logger().error("IK computation failed - cannot return to saved position")
+            self.get_logger().error("IK computation failed")
             return
-        
-        # Extract joint positions from IK solution
-        joint_positions = list(ik_result.position)
-        self.get_logger().info(f"✅ IK solution found: {[f'{p:.3f}' for p in joint_positions]}")
-        
-        # Publish the trajectory immediately (non-blocking)
-        self.publish_trajectory(joint_positions)
+
+        self.get_logger().info(
+            f"✅ IK solution found: {[f'{p:.3f}' for p in ik_result.position]}"
+        )
+
+        # ---- PLAN (THIS WAS MISSING) ----
+        trajectory = self.ik_planner.plan_to_joints(ik_result)
+        if trajectory is None:
+            self.get_logger().error("Motion planning failed")
+            return
+
+        # ---- EXECUTION GATE (SET BEFORE EXECUTION) ----
+        self.executing_return = True
         self.get_logger().info("📤 Executing return motion...")
-        
-        # Reset saved position after execution so next mouth open will save a new position
+
+        self.execute_trajectory(trajectory.joint_trajectory)
+
+        # Clear saved pose
         self.position_saved = False
         self.saved_pose = None
+
+
     
     def execute_trajectory(self, joint_traj):
-        """Execute a joint trajectory using the action client."""
+        self.get_logger().info(f"Trajectory joints: {joint_traj.joint_names}")
+
+        # Ensure valid timing
+        for i, point in enumerate(joint_traj.points):
+            point.time_from_start.sec = i + 1
+            point.time_from_start.nanosec = 0
+
         if not self.exec_ac.wait_for_server(timeout_sec=2.0):
-            self.get_logger().error("Action server not available for trajectory execution")
+            self.get_logger().error("Action server not available")
+            self.executing_return = False
             return
-        
+
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = joint_traj
-        
-        self.get_logger().info('Sending trajectory to controller...')
+
+        self.get_logger().info("Sending trajectory to controller...")
         send_future = self.exec_ac.send_goal_async(goal)
         send_future.add_done_callback(self._on_goal_sent)
+
+
     
     def _on_goal_sent(self, future):
         """Callback when trajectory goal is sent."""
@@ -951,9 +983,16 @@ class FacemeshUR7eControlNode(Node):
         """Callback when trajectory execution completes."""
         try:
             result = future.result().result
-            self.get_logger().info('Trajectory execution complete.')
+            self.get_logger().info("✅ Trajectory execution complete.")
+
         except Exception as e:
-            self.get_logger().error(f'Trajectory execution failed: {e}')
+            self.get_logger().error(f"❌ Trajectory execution failed: {e}")
+
+        finally:
+            # Always re-enable teleop AFTER execution ends
+            self.executing_return = False
+            self.executing_moveit = False
+
     
     def recenter_neutral(self):
         """Recenter the neutral pose (called from right eye blink)."""
