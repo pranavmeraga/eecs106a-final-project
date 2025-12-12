@@ -170,9 +170,6 @@ class FacemeshUR7eControlNode(Node):
             '/scaled_joint_trajectory_controller/follow_joint_trajectory'
         )
         
-        # State management: False = State 1 (position save/return), True = State 2 (gripper toggle)
-        self.state_2 = False  # Start in State 1
-        
         # Position saving for State 1
         self.saved_pose = None  # Saved end-effector pose (PoseStamped)
         self.position_saved = False  # Track if position has been saved
@@ -426,33 +423,27 @@ class FacemeshUR7eControlNode(Node):
                 self.left_eye_closed = False
                 self.left_blink_triggered = False
         
-        # Right eye blink detection - Toggle between State 1 and State 2
+        # Right eye blink detection - RECENTER NEUTRAL POSE
         if right_ear < self.EAR_THRESH:
             if not self.right_eye_closed:
                 self.right_eye_closed = True
                 self.right_eye_close_start = now
                 self.right_blink_triggered = False
             else:
-                # Eye is still closed, check if we should trigger state toggle
+                # Eye is still closed, check if we should trigger recenter
                 right_blink_hold_time = now - self.right_eye_close_start
                 if right_blink_hold_time >= self.BLINK_HOLD_TIME and not self.right_blink_triggered:
                     right_blink_triggered = True
                     self.right_blink_triggered = True
-                    self.state_2 = not self.state_2
-                    state_name = "State 2 (Gripper Toggle)" if self.state_2 else "State 1 (Position Save/Return)"
-                    self.get_logger().info(f"🔄 STATE CHANGED to {state_name} - Right eye blink held for {right_blink_hold_time:.2f}s")
-                    # Reset saved position when switching to State 1 to allow saving new position
-                    if not self.state_2:
-                        self.position_saved = False
-                        self.saved_pose = None
-                        self.get_logger().info("   Saved position cleared - ready to save new position")
-                    self.play_beep(frequency=800, duration=0.3)  # Play beep on state change
+                    self.recenter_neutral()  # ← RECENTER, NOT STATE TOGGLE
+                    self.get_logger().info(f"🎯 RECENTER - Right eye blink held for {right_blink_hold_time:.2f}s")
+                    self.play_beep(frequency=800, duration=0.2)
         else:
             if self.right_eye_closed:
                 self.right_eye_closed = False
                 self.right_blink_triggered = False
         
-        # Detect mouth open - behavior depends on state
+        # Detect mouth open - behavior depends on CONTROL MODE, not state
         mouth_top = pts[MOUTH_TOP_IDX]
         mouth_bottom = pts[MOUTH_BOTTOM_IDX]
         mouth_dist = np.linalg.norm(mouth_top - mouth_bottom)
@@ -470,16 +461,15 @@ class FacemeshUR7eControlNode(Node):
             if mouth_open_duration >= self.BLINK_HOLD_TIME and not self.grasp_toggled:
                 mouth_action_triggered = True
                 self.grasp_toggled = True
-                if self.state_2:
-                    # State 2: Toggle gripper
+                if self.control_mode_2:
+                    # MODE 2: Toggle gripper
                     self.get_logger().info(f"✊ GRASP TOGGLE - Mouth held open for {mouth_open_duration:.2f}s")
+                    self.toggle_gripper_service()
                 else:
-                    # State 1: Save position or return to saved
+                    # MODE 1: Save position or return to saved
                     if not self.position_saved:
-                        # First time: Save current position
                         self.save_current_position()
                     else:
-                        # Second time: Return to saved position
                         self.return_to_saved_position()
         elif not mouth_open and self.mouth_was_open:
             self.mouth_was_open = False
@@ -629,14 +619,9 @@ class FacemeshUR7eControlNode(Node):
         y_offset += 30
         
         # State indicator
-        state_text = "STATE 2: GRIPPER" if self.state_2 else "STATE 1: POSITION"
-        state_color = (255, 165, 0) if self.state_2 else (0, 255, 255)
-        cv2.putText(frame, state_text, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, state_color, 2)
-        if not self.state_2 and self.position_saved:
-            y_offset += 25
-            cv2.putText(frame, "POSITION SAVED", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        mode_gripper_text = "MOUTH: GRIPPER" if self.control_mode_2 else "MOUTH: SAVE/RETURN"
+        cv2.putText(frame, mode_gripper_text, (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 200, 255), 2)
         y_offset += 10
         
         status_color = (0, 255, 0) if not self.emergency_stop else (0, 0, 255)
@@ -872,22 +857,10 @@ class FacemeshUR7eControlNode(Node):
         
         try:
             # Get current end-effector pose from TF
-            # Try multiple possible EE frame names for UR7e
-            ee_frames = ['tool0', 'wrist_3_link', 'ee_link', 'flange']
-            transform = None
-            for frame in ee_frames:
-                try:
-                    transform = self.tf_buffer.lookup_transform(
-                        'base_link', frame, rclpy.time.Time()
-                    )
-                    self.get_logger().info(f"✅ Using EE frame: {frame}")
-                    break
-                except:
-                    continue
-            
-            if transform is None:
-                self.get_logger().error(f"Could not find any EE frame in: {ee_frames}")
-                return
+            # UR7e uses tool0_controller as the EE frame
+            transform = self.tf_buffer.lookup_transform(
+                'base_link', 'tool0_controller', rclpy.time.Time()
+            )
             
             # Create PoseStamped from transform
             self.saved_pose = PoseStamped()
@@ -902,11 +875,13 @@ class FacemeshUR7eControlNode(Node):
             
             self.position_saved = True
             self.get_logger().info(
-                f"💾 Position saved: ({self.saved_pose.pose.position.x:.3f}, "
-                f"{self.saved_pose.pose.position.y:.3f}, {self.saved_pose.pose.position.z:.3f})"
+                f"💾 Position saved at tool0_controller: "
+                f"({self.saved_pose.pose.position.x:.3f}, "
+                f"{self.saved_pose.pose.position.y:.3f}, "
+                f"{self.saved_pose.pose.position.z:.3f})"
             )
         except Exception as e:
-            self.get_logger().error(f"Failed to save position: {e}")
+            self.get_logger().error(f"Failed to save position (TF lookup failed): {e}")
     
     def return_to_saved_position(self):
         """Compute IK and execute motion to return to saved position."""
