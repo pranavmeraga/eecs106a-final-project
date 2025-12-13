@@ -929,7 +929,10 @@ class FacemeshUR7eControlNode(Node):
         )
 
         # ---- PLAN (THIS WAS MISSING) ----
-        trajectory = self.ik_planner.plan_to_joints(ik_result)
+        # Plan from the *current* state so the trajectory starts where the arm is now
+        trajectory = self.ik_planner.plan_to_joints(
+            ik_result, start_joint_state=self.current_joint_state
+        )
         if trajectory is None:
             self.get_logger().error("Motion planning failed")
             return
@@ -949,10 +952,21 @@ class FacemeshUR7eControlNode(Node):
     def execute_trajectory(self, joint_traj):
         self.get_logger().info(f"Trajectory joints: {joint_traj.joint_names}")
 
-        # Ensure valid timing
-        for i, point in enumerate(joint_traj.points):
-            point.time_from_start.sec = i + 1
-            point.time_from_start.nanosec = 0
+        # Preserve MoveIt's timing to avoid controller spikes/oscillation.
+        # If the planner didn't fill timing, add a gentle ramp.
+        no_timing = all(
+            p.time_from_start.sec == 0 and p.time_from_start.nanosec == 0
+            for p in joint_traj.points
+        )
+        if no_timing:
+            from builtin_interfaces.msg import Duration
+            t = 0.5
+            for point in joint_traj.points:
+                point.time_from_start = Duration(
+                    sec=int(t),
+                    nanosec=int((t % 1.0) * 1e9)
+                )
+                t += 0.5
 
         if not self.exec_ac.wait_for_server(timeout_sec=2.0):
             self.get_logger().error("Action server not available")

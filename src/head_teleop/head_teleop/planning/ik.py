@@ -85,12 +85,13 @@ class IKPlanner(Node):
     # -----------------------------------------------------------
     # Plan motion given a desired joint configuration
     # -----------------------------------------------------------
-    def plan_to_joints(self, target_joint_state):
+    def plan_to_joints(self, target_joint_state, start_joint_state=None):
         """
         Plan motion to a target joint configuration.
         
         Args:
             target_joint_state: Target joint state
+            start_joint_state: Optional start state (defaults to current robot state)
         
         Returns:
             RobotTrajectory if planning succeeds, None otherwise
@@ -113,6 +114,11 @@ class IKPlanner(Node):
             )
 
         req.motion_plan_request.goal_constraints.append(goal_constraints)
+
+        # Anchor the plan at the measured current state to avoid jumps/oscillation.
+        if start_joint_state is not None:
+            req.motion_plan_request.start_state = RobotState()
+            req.motion_plan_request.start_state.joint_state = start_joint_state
         future = self.plan_client.call_async(req)
         rclpy.spin_until_future_complete(self, future)
 
