@@ -35,7 +35,7 @@ class IKPlanner(Node):
     # Compute IK for a given (x, y, z) + quat and current robot joint state
     # -----------------------------------------------------------
     def compute_ik(self, current_joint_state, x, y, z,
-                   qx=0.0, qy=1.0, qz=0.0, qw=0.0):
+                   qx=0.0, qy=0.0, qz=0.0, qw=1.0):
         """
         Compute inverse kinematics for a target pose.
         
@@ -58,7 +58,7 @@ class IKPlanner(Node):
         pose.pose.orientation.w = float(qw)
         
         ik_req = GetPositionIK.Request()
-        ik_req.ik_request.ik_link_name = 'wrist_3_link'
+        ik_req.ik_request.ik_link_name = 'tool0'
         ik_req.ik_request.pose_stamped = pose
         rs = RobotState()
         rs.joint_state = current_joint_state
@@ -85,12 +85,13 @@ class IKPlanner(Node):
     # -----------------------------------------------------------
     # Plan motion given a desired joint configuration
     # -----------------------------------------------------------
-    def plan_to_joints(self, target_joint_state):
+    def plan_to_joints(self, target_joint_state, start_joint_state=None):
         """
         Plan motion to a target joint configuration.
         
         Args:
             target_joint_state: Target joint state
+            start_joint_state: Optional start state (defaults to current robot state)
         
         Returns:
             RobotTrajectory if planning succeeds, None otherwise
@@ -113,6 +114,11 @@ class IKPlanner(Node):
             )
 
         req.motion_plan_request.goal_constraints.append(goal_constraints)
+
+        # Anchor the plan at the measured current state to avoid jumps/oscillation.
+        if start_joint_state is not None:
+            req.motion_plan_request.start_state = RobotState()
+            req.motion_plan_request.start_state.joint_state = start_joint_state
         future = self.plan_client.call_async(req)
         rclpy.spin_until_future_complete(self, future)
 

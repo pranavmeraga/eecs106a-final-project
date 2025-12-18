@@ -127,7 +127,10 @@ def rotation_matrix_to_euler_angles(R: np.ndarray) -> tuple:
 class FacemeshUR7eControlNode(Node):
     def __init__(self, camera_index: int = 0, mirror: bool = True):
         super().__init__('facemesh_ur7e_control_node')
-        
+        self.state_2 = False
+        self.executing_return = False
+        self.executing_moveit = False
+
         self.joint_names = [
             'shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint',
             'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'
@@ -149,10 +152,11 @@ class FacemeshUR7eControlNode(Node):
         
         # Publisher for joint trajectory
         self.pub = self.create_publisher(
-            JointTrajectory, 
-            '/scaled_joint_trajectory_controller/joint_trajectory', 
+            JointTrajectory,
+            '/scaled_joint_trajectory_controller/joint_trajectory',
             10
         )
+
         
         # Gripper service client
         self.gripper_cli = self.create_client(Trigger, '/toggle_gripper')
@@ -166,12 +170,12 @@ class FacemeshUR7eControlNode(Node):
         
         # Action client for executing planned trajectories
         self.exec_ac = ActionClient(
-            self, FollowJointTrajectory,
+            self,
+            FollowJointTrajectory,
             '/scaled_joint_trajectory_controller/follow_joint_trajectory'
         )
-        
-        # State management: False = State 1 (position save/return), True = State 2 (gripper toggle)
-        self.state_2 = False  # Start in State 1
+
+
         
         # Position saving for State 1
         self.saved_pose = None  # Saved end-effector pose (PoseStamped)
@@ -426,33 +430,27 @@ class FacemeshUR7eControlNode(Node):
                 self.left_eye_closed = False
                 self.left_blink_triggered = False
         
-        # Right eye blink detection - Toggle between State 1 and State 2
+        # Right eye blink detection - RECENTER NEUTRAL POSE
         if right_ear < self.EAR_THRESH:
             if not self.right_eye_closed:
                 self.right_eye_closed = True
                 self.right_eye_close_start = now
                 self.right_blink_triggered = False
             else:
-                # Eye is still closed, check if we should trigger state toggle
+                # Eye is still closed, check if we should trigger recenter
                 right_blink_hold_time = now - self.right_eye_close_start
                 if right_blink_hold_time >= self.BLINK_HOLD_TIME and not self.right_blink_triggered:
                     right_blink_triggered = True
                     self.right_blink_triggered = True
-                    self.state_2 = not self.state_2
-                    state_name = "State 2 (Gripper Toggle)" if self.state_2 else "State 1 (Position Save/Return)"
-                    self.get_logger().info(f"🔄 STATE CHANGED to {state_name} - Right eye blink held for {right_blink_hold_time:.2f}s")
-                    # Reset saved position when switching to State 1 to allow saving new position
-                    if not self.state_2:
-                        self.position_saved = False
-                        self.saved_pose = None
-                        self.get_logger().info("   Saved position cleared - ready to save new position")
-                    self.play_beep(frequency=800, duration=0.3)  # Play beep on state change
+                    self.recenter_neutral()  # ← RECENTER, NOT STATE TOGGLE
+                    self.get_logger().info(f"🎯 RECENTER - Right eye blink held for {right_blink_hold_time:.2f}s")
+                    self.play_beep(frequency=800, duration=0.2)
         else:
             if self.right_eye_closed:
                 self.right_eye_closed = False
                 self.right_blink_triggered = False
         
-        # Detect mouth open - behavior depends on state
+        # Detect mouth open - behavior depends on CONTROL MODE, not state
         mouth_top = pts[MOUTH_TOP_IDX]
         mouth_bottom = pts[MOUTH_BOTTOM_IDX]
         mouth_dist = np.linalg.norm(mouth_top - mouth_bottom)
@@ -470,16 +468,15 @@ class FacemeshUR7eControlNode(Node):
             if mouth_open_duration >= self.BLINK_HOLD_TIME and not self.grasp_toggled:
                 mouth_action_triggered = True
                 self.grasp_toggled = True
-                if self.state_2:
-                    # State 2: Toggle gripper
+                if self.control_mode_2:
+                    # MODE 2: Toggle gripper
                     self.get_logger().info(f"✊ GRASP TOGGLE - Mouth held open for {mouth_open_duration:.2f}s")
+                    self.toggle_gripper_service()
                 else:
-                    # State 1: Save position or return to saved
+                    # MODE 1: Save position or return to saved
                     if not self.position_saved:
-                        # First time: Save current position
                         self.save_current_position()
                     else:
-                        # Second time: Return to saved position
                         self.return_to_saved_position()
         elif not mouth_open and self.mouth_was_open:
             self.mouth_was_open = False
@@ -584,7 +581,14 @@ class FacemeshUR7eControlNode(Node):
             self.toggle_gripper_service()
         
         # Publish trajectory
-        self.publish_trajectory(new_positions)
+        if self.executing_return:
+            return
+    # Don't stream commands while MoveIt/action is executing
+
+
+        if not self.executing_moveit:
+            self.publish_trajectory(new_positions)
+
         
         # Update display with overlay and show window
         self.draw_overlay(frame, dnod, dturn, left_ear, right_ear, mouth_open, self.control_mode_2,
@@ -629,14 +633,9 @@ class FacemeshUR7eControlNode(Node):
         y_offset += 30
         
         # State indicator
-        state_text = "STATE 2: GRIPPER" if self.state_2 else "STATE 1: POSITION"
-        state_color = (255, 165, 0) if self.state_2 else (0, 255, 255)
-        cv2.putText(frame, state_text, (10, y_offset),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, state_color, 2)
-        if not self.state_2 and self.position_saved:
-            y_offset += 25
-            cv2.putText(frame, "POSITION SAVED", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        mode_gripper_text = "MOUTH: GRIPPER" if self.control_mode_2 else "MOUTH: SAVE/RETURN"
+        cv2.putText(frame, mode_gripper_text, (10, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 200, 255), 2)
         y_offset += 10
         
         status_color = (0, 255, 0) if not self.emergency_stop else (0, 0, 255)
@@ -872,8 +871,9 @@ class FacemeshUR7eControlNode(Node):
         
         try:
             # Get current end-effector pose from TF
+            # UR7e uses tool0_controller as the EE frame
             transform = self.tf_buffer.lookup_transform(
-                'base_link', 'wrist_3_link', rclpy.time.Time()
+                'base_link', 'tool0_controller', rclpy.time.Time()
             )
             
             # Create PoseStamped from transform
@@ -889,62 +889,98 @@ class FacemeshUR7eControlNode(Node):
             
             self.position_saved = True
             self.get_logger().info(
-                f"💾 Position saved: ({self.saved_pose.pose.position.x:.3f}, "
-                f"{self.saved_pose.pose.position.y:.3f}, {self.saved_pose.pose.position.z:.3f})"
+                f"💾 Position saved at tool0_controller: "
+                f"({self.saved_pose.pose.position.x:.3f}, "
+                f"{self.saved_pose.pose.position.y:.3f}, "
+                f"{self.saved_pose.pose.position.z:.3f})"
             )
         except Exception as e:
-            self.get_logger().error(f"Failed to save position: {e}")
+            self.get_logger().error(f"Failed to save position (TF lookup failed): {e}")
     
     def return_to_saved_position(self):
-        """Compute IK and plan motion to return to saved position."""
         if not self.position_saved or self.saved_pose is None:
             self.get_logger().warn("No saved position to return to")
             return
-        
+
         if self.current_joint_state is None:
             self.get_logger().error("Cannot compute IK: No joint state available")
             return
-        
+
         self.get_logger().info("🔄 Computing IK to return to saved position...")
-        
-        # Compute IK for saved pose
+
+        # ---- IK ----
         ik_result = self.ik_planner.compute_ik(
             self.current_joint_state,
-            self.saved_pose.pose.position.x,
-            self.saved_pose.pose.position.y,
-            self.saved_pose.pose.position.z,
-            self.saved_pose.pose.orientation.x,
-            self.saved_pose.pose.orientation.y,
-            self.saved_pose.pose.orientation.z,
-            self.saved_pose.pose.orientation.w
+            float(self.saved_pose.pose.position.x),
+            float(self.saved_pose.pose.position.y),
+            float(self.saved_pose.pose.position.z),
+            float(self.saved_pose.pose.orientation.x),
+            float(self.saved_pose.pose.orientation.y),
+            float(self.saved_pose.pose.orientation.z),
+            float(self.saved_pose.pose.orientation.w)
         )
-        
+
         if ik_result is None:
-            self.get_logger().error("IK computation failed - cannot return to saved position")
+            self.get_logger().error("IK computation failed")
             return
-        
-        # Plan motion to IK solution
-        trajectory = self.ik_planner.plan_to_joints(ik_result)
+
+        self.get_logger().info(
+            f"✅ IK solution found: {[f'{p:.3f}' for p in ik_result.position]}"
+        )
+
+        # ---- PLAN (THIS WAS MISSING) ----
+        # Plan from the *current* state so the trajectory starts where the arm is now
+        trajectory = self.ik_planner.plan_to_joints(
+            ik_result, start_joint_state=self.current_joint_state
+        )
         if trajectory is None:
-            self.get_logger().error("Motion planning failed - cannot return to saved position")
+            self.get_logger().error("Motion planning failed")
             return
-        
-        # Execute the trajectory
+
+        # ---- EXECUTION GATE (SET BEFORE EXECUTION) ----
+        self.executing_return = True
+        self.get_logger().info("📤 Executing return motion...")
+
         self.execute_trajectory(trajectory.joint_trajectory)
-        self.get_logger().info("✅ Returning to saved position...")
+
+        # Clear saved pose
+        self.position_saved = False
+        self.saved_pose = None
+
+
     
     def execute_trajectory(self, joint_traj):
-        """Execute a joint trajectory using the action client."""
+        self.get_logger().info(f"Trajectory joints: {joint_traj.joint_names}")
+
+        # Preserve MoveIt's timing to avoid controller spikes/oscillation.
+        # If the planner didn't fill timing, add a gentle ramp.
+        no_timing = all(
+            p.time_from_start.sec == 0 and p.time_from_start.nanosec == 0
+            for p in joint_traj.points
+        )
+        if no_timing:
+            from builtin_interfaces.msg import Duration
+            t = 0.5
+            for point in joint_traj.points:
+                point.time_from_start = Duration(
+                    sec=int(t),
+                    nanosec=int((t % 1.0) * 1e9)
+                )
+                t += 0.5
+
         if not self.exec_ac.wait_for_server(timeout_sec=2.0):
-            self.get_logger().error("Action server not available for trajectory execution")
+            self.get_logger().error("Action server not available")
+            self.executing_return = False
             return
-        
+
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = joint_traj
-        
-        self.get_logger().info('Sending trajectory to controller...')
+
+        self.get_logger().info("Sending trajectory to controller...")
         send_future = self.exec_ac.send_goal_async(goal)
         send_future.add_done_callback(self._on_goal_sent)
+
+
     
     def _on_goal_sent(self, future):
         """Callback when trajectory goal is sent."""
@@ -961,9 +997,16 @@ class FacemeshUR7eControlNode(Node):
         """Callback when trajectory execution completes."""
         try:
             result = future.result().result
-            self.get_logger().info('Trajectory execution complete.')
+            self.get_logger().info("✅ Trajectory execution complete.")
+
         except Exception as e:
-            self.get_logger().error(f'Trajectory execution failed: {e}')
+            self.get_logger().error(f"❌ Trajectory execution failed: {e}")
+
+        finally:
+            # Always re-enable teleop AFTER execution ends
+            self.executing_return = False
+            self.executing_moveit = False
+
     
     def recenter_neutral(self):
         """Recenter the neutral pose (called from right eye blink)."""
