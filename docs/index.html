@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HECTUR - Head-Eye Control and Tracking for UR7e | EE106A Final Project</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary-color: #2563eb;
+            --secondary-color: #1e40af;
+            --accent-color: #3b82f6;
+            --text-color: #1f2937;
+            --text-light: #6b7280;
+            --bg-color: #ffffff;
+            --bg-light: #f9fafb;
+            --border-color: #e5e7eb;
+            --code-bg: #f3f4f6;
+            --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+            --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background-color: var(--bg-color);
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+
+        header {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: white;
+            padding: 3rem 0;
+            margin-bottom: 3rem;
+            box-shadow: var(--shadow-lg);
+        }
+
+        header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+            font-weight: 700;
+        }
+
+        header .subtitle {
+            font-size: 1.25rem;
+            opacity: 0.95;
+            font-weight: 300;
+        }
+
+        nav {
+            background-color: var(--bg-light);
+            padding: 1rem 0;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: var(--shadow);
+            margin-bottom: 2rem;
+        }
+
+        nav ul {
+            list-style: none;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1.5rem;
+            justify-content: center;
+        }
+
+        nav a {
+            color: var(--text-color);
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        nav a:hover {
+            color: var(--primary-color);
+        }
+
+        section {
+            margin-bottom: 4rem;
+            scroll-margin-top: 80px;
+        }
+
+        h2 {
+            font-size: 2rem;
+            color: var(--primary-color);
+            margin-bottom: 1.5rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 3px solid var(--primary-color);
+        }
+
+        h3 {
+            font-size: 1.5rem;
+            color: var(--secondary-color);
+            margin-top: 2rem;
+            margin-bottom: 1rem;
+        }
+
+        h4 {
+            font-size: 1.25rem;
+            color: var(--text-color);
+            margin-top: 1.5rem;
+            margin-bottom: 0.75rem;
+        }
+
+        p {
+            margin-bottom: 1rem;
+            text-align: justify;
+        }
+
+        ul, ol {
+            margin-left: 2rem;
+            margin-bottom: 1rem;
+        }
+
+        li {
+            margin-bottom: 0.5rem;
+        }
+
+        .highlight-box {
+            background-color: var(--bg-light);
+            border-left: 4px solid var(--primary-color);
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+            border-radius: 4px;
+        }
+
+        .controls-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+            box-shadow: var(--shadow);
+            overflow: hidden;
+            border-radius: 8px;
+        }
+
+        .controls-table th {
+            background-color: var(--primary-color);
+            color: white;
+            padding: 1rem;
+            text-align: left;
+            font-weight: 600;
+        }
+
+        .controls-table td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .controls-table tr:nth-child(even) {
+            background-color: var(--bg-light);
+        }
+
+        .controls-table tr:hover {
+            background-color: #e0e7ff;
+        }
+
+        .code-block {
+            background-color: var(--code-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 1rem;
+            margin: 1rem 0;
+            overflow-x: auto;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.9rem;
+        }
+
+        .team-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 2rem;
+            margin: 2rem 0;
+        }
+
+        .team-member {
+            background-color: var(--bg-light);
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: var(--shadow);
+        }
+
+        .team-member h4 {
+            color: var(--primary-color);
+            margin-top: 0;
+        }
+
+        .flow-diagram {
+            background-color: var(--bg-light);
+            padding: 2rem;
+            border-radius: 8px;
+            margin: 2rem 0;
+            text-align: center;
+            font-family: monospace;
+            line-height: 2;
+        }
+
+        .flow-diagram .arrow {
+            color: var(--primary-color);
+            font-size: 1.5rem;
+            margin: 0.5rem 0;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            background-color: var(--primary-color);
+            color: white;
+            border-radius: 12px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            margin: 0.25rem;
+        }
+
+        .warning-box {
+            background-color: #fef3c7;
+            border-left: 4px solid #f59e0b;
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 4px;
+        }
+
+        .success-box {
+            background-color: #d1fae5;
+            border-left: 4px solid #10b981;
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 4px;
+        }
+
+        footer {
+            background-color: var(--bg-light);
+            padding: 2rem 0;
+            margin-top: 4rem;
+            text-align: center;
+            color: var(--text-light);
+            border-top: 1px solid var(--border-color);
+        }
+
+        @media (max-width: 768px) {
+            header h1 {
+                font-size: 2rem;
+            }
+
+            nav ul {
+                flex-direction: column;
+                gap: 0.5rem;
+            }
+
+            .team-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .section-number {
+            color: var(--primary-color);
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>HECTUR</h1>
+            <p class="subtitle">Head-Eye Control and Tracking for UR7e</p>
+            <p class="subtitle" style="font-size: 1rem; margin-top: 0.5rem;">EE106A Fall 2025 Final Project</p>
+        </div>
+    </header>
+
+    <nav>
+        <div class="container">
+            <ul>
+                <li><a href="#introduction">1. Introduction</a></li>
+                <li><a href="#design">2. Design</a></li>
+                <li><a href="#implementation">3. Implementation</a></li>
+                <li><a href="#results">4. Results</a></li>
+                <li><a href="#conclusion">5. Conclusion</a></li>
+                <li><a href="#team">6. Team</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <div class="container">
+        <section id="introduction">
+            <h2><span class="section-number">1.</span> Introduction</h2>
+            
+            <h3>(a) End Goal</h3>
+            <p>
+                The goal of <strong>HECTUR</strong> (Head-Eye Control and Tracking for UR7e) is to develop an accessible, non-invasive human-robot interface that allows users to control a robotic manipulator using head gestures, eye blinks, and facial movements. The system enables users–particularly individuals with limited limb mobility–to teleoperate a UR7e robotic arm using only a standard webcam and computer vision, without relying on expensive prosthetics or neural-based interfaces. The project aims to translate intuitive facial and head movements into safe, real-time, velocity-based robotic control, suitable for performing simple, day-to-day manipulation tasks.
+            </p>
+
+            <h3>(b) Interesting Problems</h3>
+            <p>
+                We were interested in this project because it tackles a real-world accessibility problem using affordable equipment by combining computer vision and robotic control. We had to figure out how to extract a 3D head pose and facial state from a 2D live video captured by a simple monocular RGB camera. Then, we had to ensure that noisy, unintentional, instinctive actions were filtered and smoothed. Lastly, with limited measurable DOF, we had to design an intuitive yet capable control system with quality-of-life features for common everyday tasks.
+            </p>
+
+            <div class="highlight-box">
+                <h4>Key Challenges:</h4>
+                <ul>
+                    <li><strong>Extracting reliable 3D head pose information</strong> from a monocular RGB camera</li>
+                    <li><strong>Mapping noisy, low-DOF human gestures</strong> into meaningful multi-DOF robot motion</li>
+                    <li><strong>Ensuring safety and stability</strong> in velocity-based teleoperation</li>
+                    <li><strong>Designing a state-based control scheme</strong> to compensate for limited sensing fidelity</li>
+                    <li><strong>Differentiating intentional gestures</strong> (blinks, mouth open) from natural human behavior</li>
+                    <li><strong>Implementing checkpoint poses</strong> to reduce redundant movements using IK</li>
+                </ul>
+            </div>
+
+            <h3>(c) Real-World Applications</h3>
+            <div class="highlight-box">
+                <ul>
+                    <li><strong>Assistive robotics</strong> for individuals with motor impairments</li>
+                    <li><strong>Teleoperation</strong> in hazardous or constrained workspaces</li>
+                    <li><strong>Hands-free robotic interfaces</strong> in medical or industrial settings</li>
+                </ul>
+            </div>
+        </section>
+
+        <section id="design">
+            <h2><span class="section-number">2.</span> Design</h2>
+
+            <h3>(a) Design Criteria</h3>
+            <p>
+                Our project must be able to <strong>sense, plan, and actuate</strong>. We wanted our robot to be able to detect head and facial gestures reliably and use that as human input to safely teleoperate the robot arm. For planning, we designate a checkpoint that the robot can automatically return to, both on command. We also want to be able to recenter (adjust the zero state) of the user's head on command and emergency stop the arm on command.
+            </p>
+
+            <h3>(b) Design Choice</h3>
+            <p>
+                The system uses <strong>MediaPipe Face Mesh</strong> to track 468 facial landmarks and compute head yaw, pitch, and roll; eye aspect ratio for blink detection; and mouth openness as a discrete command (either checkpoint saving/returning or gripper toggle). These signals are processed through a ROS2-based pipeline consisting of a sensing node (<code>head_pose_blink_node</code>), a mapping node (<code>head_teleop_mapper_node</code>), and a robot control node (<code>facemesh_ur7e_control_node</code>). Processing includes applying a significant deadzone around the neutral head and facial state, then smoothing out the signal and filtering any estimations.
+            </p>
+
+            <h4>Control Mappings</h4>
+            
+            <h5>State #1:</h5>
+            <table class="controls-table">
+                <thead>
+                    <tr>
+                        <th>Human Action</th>
+                        <th>Robot Response</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Look Up & Down</td>
+                        <td>Base Link Pitch</td>
+                    </tr>
+                    <tr>
+                        <td>Look Left & Right</td>
+                        <td>Base Link Yaw</td>
+                    </tr>
+                    <tr>
+                        <td>Mouth Open (1st open)</td>
+                        <td>Save waypoint</td>
+                    </tr>
+                    <tr>
+                        <td>Mouth Open (Subsequent open)</td>
+                        <td>Return to waypoint saved by first open</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h5>State #2:</h5>
+            <table class="controls-table">
+                <thead>
+                    <tr>
+                        <th>Human Action</th>
+                        <th>Robot Response</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Look Up & Down</td>
+                        <td>Extend/Retract (rotating the Elbow and baseline pitch angles to extend and retract)</td>
+                    </tr>
+                    <tr>
+                        <td>Look Left & Right</td>
+                        <td>End Effector Roll</td>
+                    </tr>
+                    <tr>
+                        <td>Mouth Open</td>
+                        <td>Toggle Gripper</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h5>Eye-Blink Commands (3 seconds):</h5>
+            <table class="controls-table">
+                <thead>
+                    <tr>
+                        <th>Blink Type</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Left</td>
+                        <td>Stop</td>
+                    </tr>
+                    <tr>
+                        <td>Right</td>
+                        <td>Reset Frame</td>
+                    </tr>
+                    <tr>
+                        <td>Both</td>
+                        <td>Switch States</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="warning-box">
+                <strong>Safety Features:</strong> E-Stop, Large Motion Thresholds, Restricted Gains, Reduced Velocities
+            </div>
+
+            <p>
+                To return to a waypoint, knowing the goal end-effector pose and the current joint state, we compute the inverse kinematics and use that to form a trajectory via MoveIt.
+            </p>
+
+            <h3>(c) Design Choices & Trade-offs</h3>
+            <ul>
+                <li><strong>Velocity-based control</strong> instead of position control for smoother, safer, and more precise motion. We did not want the robot to move at a high speed spontaneously in the case that we fail to catch a noisy measurement.</li>
+                <li><strong>State-based control scheme</strong>: Since we can only detect limited facial states, we designated one of the discrete inputs to swap between 2 states and overload the mappings to allow for more DOF on the robot arm. The trade-off is that it will increase the cognitive load on the user's side.</li>
+                <li><strong>Discrete binary signals</strong> for blink and mouth movements since they are harder to control precisely. The trade-off is that we can't directly use them to control the robotic arm movements, so we lose potential degrees of freedom, but we can use them for other necessary tasks/features.</li>
+            </ul>
+
+            <h3>(d) Impact on Real Engineering Criteria</h3>
+            <div class="highlight-box">
+                <ul>
+                    <li><strong>Robustness:</strong> Dead zones, filtering, and state separation improve stability</li>
+                    <li><strong>Durability:</strong> Software-only interface reduces mechanical wear</li>
+                    <li><strong>Efficiency:</strong> Lightweight CV model runs in real time</li>
+                    <li><strong>Safety:</strong> Emergency stop, motion thresholds, and conservative gains prioritize user and robot safety</li>
+                </ul>
+            </div>
+            <p>
+                These choices make the system viable for real-world assistive use. However, because we compromise on speed and DOF for safety, precision, and other features, further sensing improvements are needed to improve efficiency and robustness.
+            </p>
+        </section>
+
+        <section id="implementation">
+            <h2><span class="section-number">3.</span> Implementation</h2>
+
+            <h3>(a) Hardware</h3>
+            <ul>
+                <li><strong>UR7e Robotic Arm</strong></li>
+                <li><strong>Logitech C922 Webcam</strong></li>
+                <li><strong>Standard workstation</strong> running ROS2</li>
+            </ul>
+
+            <h3>(b) Parts Used</h3>
+            <p>No additional manufacturing was conducted, strictly a Logitech Webcam and a UR7e Robotic Arm.</p>
+
+            <h3>(c) Software Architecture</h3>
+
+            <h4>Launch System</h4>
+            <ul>
+                <li>Declares runtime arguments (camera selection)</li>
+                <li>Starts the MoveIt motion planning stack for the UR7</li>
+                <li>Initializes the custom teleoperation and control node</li>
+            </ul>
+            <p>
+                MoveIt is launched before the teleoperation node to prevent deadlock and ensure motion planning requests don't fail because of an uninitialized MoveIt.
+            </p>
+
+            <h4>MoveIt Configuration</h4>
+            <div class="code-block">
+                Planning group: ur_manipulator<br>
+                Planner: RRTConnectkConfigDefault<br>
+                Controller: scaled_joint_trajectory_controller
+            </div>
+
+            <h4>Node Descriptions</h4>
+
+            <div class="highlight-box">
+                <h5>head_pose_blink_node</h5>
+                <p>This node interfaces with MediaPipe Face Mesh, which tracks 468 facial landmarks from a monocular RGB camera.</p>
+                <ul>
+                    <li>Head pose (yaw, pitch, roll) as a Vector3</li>
+                    <li>Eye blink events using eye aspect ratio thresholds</li>
+                    <li>Mouth openness as a discrete Boolean signal</li>
+                </ul>
+                <p><strong>Robustness improvements:</strong> Dead zones near the neutral head pose, temporal smoothing, thresholding to reduce false positives</p>
+            </div>
+
+            <div class="highlight-box">
+                <h5>head_teleop_mapper_node</h5>
+                <p>This node translates facial gestures into robot commands using a two-state control scheme as outlined in the input mapping above. It outputs commands as ROS2 messages: Twist messages for joint motion and Bool messages for gripper and stop commands.</p>
+            </div>
+
+            <div class="highlight-box">
+                <h5>facemesh_ur7e_control_node</h5>
+                <p>This node serves as the central control hub of the system. Commands are sent to the <code>scaled_joint_trajectory_controller</code>.</p>
+                <p><strong>Responsibilities:</strong></p>
+                <ul>
+                    <li>Initializing the IK planner node for motion planning</li>
+                    <li>Selecting between velocity control and planned motion</li>
+                    <li>Scaling and saturating joint velocities</li>
+                    <li>Enforcing safety constraints</li>
+                    <li>Sending commands to the UR7e controller</li>
+                </ul>
+            </div>
+
+            <h4>planning/ik</h4>
+            <p>Planning is used for returning to a saved waypoint, a goal-based command for which we need to compute the IK and construct a trajectory.</p>
+
+            <h5>IK Computation:</h5>
+            <ul>
+                <li>Constructs a PoseStamped target in the base_link frame</li>
+                <li>Anchors the solution using the current joint state</li>
+                <li>Requests a collision-aware IK solution via <code>/compute_ik</code></li>
+                <li>Validates the result against joint limits</li>
+            </ul>
+
+            <h5>Motion Planning:</h5>
+            <ul>
+                <li>Converts the IK result into joint constraints</li>
+                <li>Requests a trajectory from <code>/plan_kinematic_path</code></li>
+                <li>Uses RRTConnect for planning</li>
+                <li>Returns a time-parameterized joint trajectory</li>
+            </ul>
+
+            <h4>System Flow Diagram</h4>
+            <div class="flow-diagram">
+                Webcam<br>
+                <span class="arrow">↓</span><br>
+                MediaPipe Face Mesh<br>
+                <span class="arrow">↓</span><br>
+                head_pose_blink_node<br>
+                <span class="arrow">↓</span><br>
+                head_teleop_mapper_node<br>
+                <span class="arrow">↓</span><br>
+                facemesh_ur7e_control_node<br>
+                <span style="display: block; margin-top: 1rem;">
+                    ├── Joint Velocity Control → UR7e Controller<br>
+                    └── IK + Motion Planning → MoveIt → UR7e Controller
+                </span>
+            </div>
+
+            <h3>(d) Complete System Workflow</h3>
+            <ol>
+                <li>Webcam captures user's face</li>
+                <li>MediaPipe extracts facial landmarks</li>
+                <li>Head pose, blinks, and mouth state are computed and filtered</li>
+                <li>Gestures are mapped according to the active control state</li>
+                <li>Commands are scaled and adjusted, computing IK if necessary</li>
+                <li>Joint velocities are sent to the UR7e</li>
+                <li>Safety commands are prioritized</li>
+                <li>Robot executes motion or returns to savepoint/tuck position</li>
+            </ol>
+        </section>
+
+        <section id="results">
+            <h2><span class="section-number">4.</span> Results</h2>
+
+            <h3>(a) Performance & Tasks</h3>
+            <p>The system successfully:</p>
+            <ul>
+                <li>Controlled multiple UR7e joints using head gestures</li>
+                <li>Switched control modes via blink detection</li>
+                <li>Safely stopped and reset motion</li>
+                <li>Toggled the gripper</li>
+                <li>Returned to a saved pose or tuck position via mouth commands</li>
+                <li>Helped the user perform simple common tasks like picking up objects and putting them in designated buckets</li>
+            </ul>
+
+            <div class="success-box">
+                <strong>Note:</strong> Video demonstration and images should be added here. Please include links to videos and screenshots of the system in operation.
+            </div>
+        </section>
+
+        <section id="conclusion">
+            <h2><span class="section-number">5.</span> Conclusion</h2>
+
+            <h3>(a) Design Criteria Assessment</h3>
+            <p>Our final solution met the final criterion pretty well:</p>
+
+            <ul>
+                <li><strong>Planning:</strong> We implemented a change post-presentation to our Planning requirement. By toggling your mouth opening, you are able to save a pose for the UR7e robotic arm, and when you toggle again, MoveIt is deployed to take in the current position of the robot and the saved waypoint, and undergoes an IK planner node to restore the arm to that saved pose.</li>
+                
+                <li><strong>Sensing:</strong> Real-time tracking of 468 different points on a face mesh from a 2D frame converted into 3D commands. The MediaPipe FaceMesh program also has to encounter recentering for dynamic environments or camera setups via blink commands.</li>
+                
+                <li><strong>Actuation:</strong> The actuation node sends ROS 2 messages in the Joint-Velocities space for the robotic arm to execute commands in a safe, smooth manner.</li>
+                
+                <li><strong>Hardware:</strong> We utilized the UR7e robotic arm and a Logitech C922 Webcam.</li>
+            </ul>
+
+            <h3>(b) Difficulties Encountered</h3>
+            <p>
+                Ideating a planning requirement due to the ambiguity of what was acceptable before the presentation did cause some confusion on our part for developing our planning node. In addition, we noticed slight errors in our extreme turns and nods for movement commands for the FaceMesh, as when you move to a point where your eyes are not tracked, it can cause an unintentional reset state.
+            </p>
+
+            <h3>(c) Flaws, Hacks, and Future Improvements</h3>
+            <p>As mentioned in the previous question, we noticed shortcomings in the MediaPipe FaceMesh for extreme commands. What we would like to improve:</p>
+            <ul>
+                <li>Fine-tune the gains so that turns can correlate to fast velocities without causing excessively unsafe motor controls if outside our set safety bounds</li>
+                <li>Look into finetuning the Eye Aspect Ratio (EAR) metric for maybe hindering such edge cases</li>
+                <li>Look into different open-source CV models that can offer a more accurate 3D reconstruction and will not be as sensitive</li>
+                <li>Include a headset with the webcam integrated (or incorporating a VR headset) for a more modular setup for real-life applications</li>
+                <li>Fine-tune the facial regions of FaceMesh to account for more DOF without switching states (eyebrow movements, jaw twitching, etc.)</li>
+            </ul>
+        </section>
+
+        <section id="team">
+            <h2><span class="section-number">6.</span> Team</h2>
+
+            <h3>(a) Team Members</h3>
+            <div class="team-grid">
+                <div class="team-member">
+                    <h4>Pranav Meraga</h4>
+                    <p>An Aerospace Engineering major interested in robotics and AI. He is well-versed in SolidWorks, embedded systems, and mechanical prototyping.</p>
+                </div>
+                <div class="team-member">
+                    <h4>Loveveer Singh</h4>
+                    <p>An EECS major interested in robotics, AI/ML, and computer architecture. He has experience with Raspberry Pi and ESP32-based projects.</p>
+                </div>
+                <div class="team-member">
+                    <h4>Jack Bian</h4>
+                    <p>A hobbyist engineer interested in mechatronics and practical robotics, with experience in fabrication and control systems.</p>
+                </div>
+                <div class="team-member">
+                    <h4>Alan Li</h4>
+                    <p>An EECS major interested in robotics and computer vision. He enjoys working with automated robotic systems using perception and control.</p>
+                </div>
+            </div>
+
+            <h3>(b) Major Contributions</h3>
+            <div class="highlight-box">
+                <h4>Pranav Meraga</h4>
+                <ul>
+                    <li>Developed the idea from scratch and contributed mainly to the proposal</li>
+                    <li>Contributed to the early structure and repository for the check-ins we needed to complete for the project</li>
+                    <li>Developed the early, non-ROS-based FaceMesh implementation for personal testing</li>
+                    <li>Relayed responsibilities to group members and organized equipment pickup and drop-off</li>
+                    <li>Developed the IK planner for our planning requirement</li>
+                    <li>Developed the entire slideshow presentation for our group and executed the demo</li>
+                </ul>
+            </div>
+        </section>
+
+        <section id="additional">
+            <h2><span class="section-number">7.</span> Additional Materials</h2>
+            <ul>
+                <li><strong>Code, URDFs, and launch files:</strong> Available in the repository</li>
+                <li><strong>CAD models:</strong> No additional hardware was manufactured</li>
+                <li><strong>Data sheets:</strong> UR7e and Logitech C922 specifications available from manufacturers</li>
+                <li><strong>Videos and images:</strong> Please add links to demonstration videos and screenshots</li>
+                <li><strong>GitHub Repository:</strong> <a href="https://github.com/yourusername/eecs106a-final-project" target="_blank">View on GitHub</a></li>
+            </ul>
+        </section>
+    </div>
+
+    <footer>
+        <div class="container">
+            <p>HECTUR - Head-Eye Control and Tracking for UR7e | EE106A Fall 2025 Final Project</p>
+            <p style="margin-top: 0.5rem; font-size: 0.875rem;">
+                Built with MediaPipe, ROS2, and MoveIt
+            </p>
+        </div>
+    </footer>
+</body>
+</html>
