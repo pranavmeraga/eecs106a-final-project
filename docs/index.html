@@ -267,6 +267,67 @@
             color: var(--primary-color);
             font-weight: 600;
         }
+
+        /* Image and Video Styles */
+        .media-container {
+            margin: 2rem 0;
+            text-align: center;
+        }
+
+        .image-container {
+            margin: 1.5rem 0;
+            text-align: center;
+        }
+
+        .image-container img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            box-shadow: var(--shadow-lg);
+            border: 1px solid var(--border-color);
+        }
+
+        .image-caption {
+            margin-top: 0.5rem;
+            font-style: italic;
+            color: var(--text-light);
+            font-size: 0.9rem;
+        }
+
+        .video-container {
+            position: relative;
+            padding-bottom: 56.25%; /* 16:9 aspect ratio */
+            height: 0;
+            overflow: hidden;
+            max-width: 100%;
+            margin: 2rem 0;
+            border-radius: 8px;
+            box-shadow: var(--shadow-lg);
+            background-color: #000;
+        }
+
+        .video-container iframe {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+
+        .video-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin: 2rem 0;
+        }
+
+        .image-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin: 2rem 0;
+        }
     </style>
 </head>
 <body>
@@ -573,8 +634,83 @@
                 <li>Helped the user perform simple common tasks like picking up objects and putting them in designated buckets</li>
             </ul>
 
-            <div class="success-box">
-                <strong>Note:</strong> Video demonstration and images should be added here. Please include links to videos and screenshots of the system in operation.
+            <h3>(b) Video Demonstrations</h3>
+            
+            <h4>Main Demonstration Video</h4>
+            <!-- Replace VIDEO_ID with your YouTube video ID (the part after v= in the URL) -->
+            <!-- Example: https://www.youtube.com/watch?v=VIDEO_ID -->
+            <div class="video-container">
+                <iframe 
+                    src="https://www.youtube.com/embed/VIDEO_ID" 
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+                    allowfullscreen>
+                </iframe>
+            </div>
+            <p class="image-caption">Full system demonstration showing head gesture control of the UR7e robotic arm</p>
+
+            <h4>Additional Videos</h4>
+            <div class="video-grid">
+                <!-- YouTube Video Example -->
+                <div>
+                    <div class="video-container">
+                        <iframe 
+                            src="https://www.youtube.com/embed/VIDEO_ID_2" 
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+                            allowfullscreen>
+                        </iframe>
+                    </div>
+                    <p class="image-caption">Control mode switching demonstration</p>
+                </div>
+
+                <!-- Google Drive Video Example -->
+                <!-- For Google Drive: Right-click video → Get link → Change to "Anyone with the link can view" -->
+                <!-- Then use: https://drive.google.com/file/d/FILE_ID/preview -->
+                <div>
+                    <div class="video-container">
+                        <iframe 
+                            src="https://drive.google.com/file/d/FILE_ID/preview" 
+                            allow="autoplay" 
+                            allowfullscreen>
+                        </iframe>
+                    </div>
+                    <p class="image-caption">Object manipulation task demonstration</p>
+                </div>
+            </div>
+
+            <h3>(c) Images and Screenshots</h3>
+            
+            <h4>System Setup</h4>
+            <div class="image-grid">
+                <!-- Option 1: Images stored in the repository -->
+                <!-- Create an 'images' folder in docs/ and reference like this: -->
+                <div class="image-container">
+                    <img src="images/setup.jpg" alt="System setup with UR7e and webcam">
+                    <p class="image-caption">Complete system setup showing UR7e robotic arm and Logitech C922 webcam</p>
+                </div>
+
+                <!-- Option 2: External image URLs -->
+                <div class="image-container">
+                    <img src="https://example.com/path/to/image.jpg" alt="Face tracking visualization">
+                    <p class="image-caption">MediaPipe Face Mesh tracking visualization</p>
+                </div>
+            </div>
+
+            <h4>Control Interface</h4>
+            <div class="image-container">
+                <img src="images/control_interface.png" alt="Control interface screenshot">
+                <p class="image-caption">Real-time control interface showing head pose tracking and mode indicators</p>
+            </div>
+
+            <h4>Task Demonstrations</h4>
+            <div class="image-grid">
+                <div class="image-container">
+                    <img src="images/pick_and_place_1.jpg" alt="Pick and place task">
+                    <p class="image-caption">Picking up an object using head gesture control</p>
+                </div>
+                <div class="image-container">
+                    <img src="images/pick_and_place_2.jpg" alt="Placing object">
+                    <p class="image-caption">Placing object in designated bucket</p>
+                </div>
             </div>
         </section>
 
