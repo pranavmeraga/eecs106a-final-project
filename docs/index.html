@@ -659,24 +659,24 @@
                 <div>
                     <div class="video-container">
                         <iframe 
-                            src="https://drive.google.com/file/d/FILE_ID_1/preview" 
+                            src="https://drive.google.com/file/d/1yVQeP7MNTp9eJdS9JW9ifJf4LD1dVzAd/preview" 
                             allow="autoplay" 
                             allowfullscreen>
                         </iframe>
                     </div>
-                    <p class="image-caption">Planning demonstration 1: Side-by-side view of FaceMesh head commands and robot execution</p>
+                    <p class="image-caption">Robotic arm movement: Side-by-side view of FaceMesh head commands and robot execution</p>
                 </div>
 
                 <!-- Google Drive Video 2 -->
                 <div>
                     <div class="video-container">
                         <iframe 
-                            src="https://drive.google.com/file/d/FILE_ID_2/preview" 
+                            src="https://drive.google.com/file/d/1mrvXrUtD3pRL-NibsLcmNhmpdDIeYSYI/preview" 
                             allow="autoplay" 
                             allowfullscreen>
                         </iframe>
                     </div>
-                    <p class="image-caption">Planning demonstration 2: Side-by-side view of FaceMesh head commands and robot execution</p>
+                    <p class="image-caption">Face commands for the arm: Side-by-side view of FaceMesh head commands and robot execution</p>
                 </div>
             </div>
         </section>
@@ -697,12 +697,17 @@
                 <li><strong>Hardware:</strong> We utilized the UR7e robotic arm and a Logitech C922 Webcam.</li>
             </ul>
 
-            <h3>(b) Difficulties Encountered</h3>
+            <h3>(b) Post-Presentation Changes</h3>
+            <p>
+                Following the initial presentation, we implemented a significant enhancement to our planning requirement using MoveIt. We developed an IK planner that enables users to toggle a save mode, allowing them to save a checkpoint pose of the robotic arm. When the save mode is toggled again, the system uses MoveIt to compute the inverse kinematics solution and plan a trajectory to return the arm to the previously saved pose. This feature provides users with the ability to quickly return to important positions during manipulation tasks, reducing redundant movements and improving overall efficiency.
+            </p>
+
+            <h3>(c) Difficulties Encountered</h3>
             <p>
                 Ideating a planning requirement due to the ambiguity of what was acceptable before the presentation did cause some confusion on our part for developing our planning node. In addition, we noticed slight errors in our extreme turns and nods for movement commands for the FaceMesh, as when you move to a point where your eyes are not tracked, it can cause an unintentional reset state.
             </p>
 
-            <h3>(c) Flaws, Hacks, and Future Improvements</h3>
+            <h3>(d) Flaws, Hacks, and Future Improvements</h3>
             <p>As mentioned in the previous question, we noticed shortcomings in the MediaPipe FaceMesh for extreme commands. What we would like to improve:</p>
             <ul>
                 <li>Fine-tune the gains so that turns can correlate to fast velocities without causing excessively unsafe motor controls if outside our set safety bounds</li>
@@ -741,11 +746,36 @@
                 <h4>Pranav Meraga</h4>
                 <ul>
                     <li>Developed the idea from scratch and contributed mainly to the proposal</li>
-                    <li>Contributed to the early structure and repository for the check-ins we needed to complete for the project</li>
+                    <li>Created the early structure and repository for the check-ins we needed to complete for the project</li>
                     <li>Developed the early, non-ROS-based FaceMesh implementation for personal testing</li>
-                    <li>Relayed responsibilities to group members and organized equipment pickup and drop-off</li>
+                    <li>Relayed responsibilities to group members and coordinated equipment pickup and drop-off</li>
                     <li>Developed the IK planner for our planning requirement</li>
                     <li>Developed the entire slideshow presentation for our group and executed the demo</li>
+                </ul>
+            </div>
+            <div class="highlight-box">
+                <h4>Loveveer Singh</h4>
+                <ul>
+                    <li>Contributed to the final repository and the majority of the codebase</li>
+                    <li>Deployed the system during live demos</li>
+                    <li>Lead implementation of the planning module for post-presentation updates</li>
+                    <li>Assisted in leading the project as well and structuring the entire repository/README for readability</li>
+                </ul>
+            </div>
+            <div class="highlight-box">
+                <h4>Jack Bian</h4>
+                <ul>
+                    <li>Recorded live demos and assisted in the formulation of presentation slides</li>
+                    <li>Helped in ideation and troubleshooting during demonstration sessions</li>
+                    <li>Facilitated communication with course staff on project requirements</li>
+                </ul>
+            </div>
+            <div class="highlight-box">
+                <h4>Alan Li</h4>
+                <ul>
+                    <li>Contributed to system design and additional feature ideation for the project</li>
+                    <li>Assisted with debugging and polishing irregular IK and motion planning behavior</li>
+                    <li>Documented design choices and software implementation for the final report</li>
                 </ul>
             </div>
         </section>
